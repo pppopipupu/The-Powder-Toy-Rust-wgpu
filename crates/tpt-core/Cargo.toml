@@ -1,0 +1,12 @@
+[package]
+name = "tpt-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core constants, particle types, element registry, walls and commands for the Rust Powder Toy rewrite"
+
+[dependencies]
+bytemuck = { workspace = true }
+serde = { workspace = true }
+glam = { workspace = true }

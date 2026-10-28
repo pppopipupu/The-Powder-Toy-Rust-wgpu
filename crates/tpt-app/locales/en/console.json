@@ -1,0 +1,17 @@
+{
+  "clear_log": "Clear Log",
+  "enter_hint": "Enter runs the last line · Shift+Enter adds a line below",
+  "error_empty_script": "[error] empty script",
+  "error_prefix": "[error] {0}",
+  "error_unknown_command": "Unknown command: {0}",
+  "execute": "Execute Lua",
+  "help": "Commands:\n  !quit — quit the game\n  !reset — clear the simulation\n  !clear — clear the console log\n  !save [name] — save the simulation\n  !load [name] — load a save from the saves folder\n  h, help, !help — show this list\nAnything else runs as Lua.",
+  "input_hint": "-- e.g. sim.partCreate(100, 100, elem.DEFAULT_PT_DUST)",
+  "no_output": "(no output yet)",
+  "subtitle": "sim · elem · ren · evt — scripts run against the live simulation",
+  "template_custom_element": "Register Custom Element",
+  "template_explosion_wave": "Create Explosion Wave",
+  "template_particle_ring": "Spawn Particle Ring",
+  "templates": "Templates:",
+  "title": "Lua Console"
+}

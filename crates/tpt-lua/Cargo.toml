@@ -1,0 +1,24 @@
+[package]
+name = "tpt-lua"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Lua 5.4 scripting layer for The Powder Toy (Rust + wgpu + CubeCL rewrite)"
+
+[dependencies]
+tpt-core = { workspace = true }
+tpt-sim = { workspace = true }
+tpt-save = { workspace = true }
+mlua = { workspace = true }
+png = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `bz2` (`LuaBz2.cpp`) and `platform.clipboardCopy/Paste`
+# (`LuaPlatform.cpp:51-65`).
+bzip2 = "0.5.2"
+arboard = { version = "3.7.0", default-features = false }
+
+# Tests build a headless `SimulationEngine`, which needs a CubeCL client.
+[dev-dependencies]
+cubecl = { workspace = true }

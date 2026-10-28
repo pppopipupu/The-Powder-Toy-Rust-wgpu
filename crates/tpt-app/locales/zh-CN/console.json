@@ -1,0 +1,17 @@
+{
+  "clear_log": "清空日志",
+  "enter_hint": "Enter 执行最后一行 · Shift+Enter 在下方换行",
+  "error_empty_script": "[错误] 脚本为空",
+  "error_prefix": "[错误] {0}",
+  "error_unknown_command": "未知命令：{0}",
+  "execute": "执行 Lua",
+  "help": "命令：\n  !quit — 退出游戏\n  !reset — 清空当前模拟\n  !clear — 清空控制台日志\n  !save [名称] — 保存模拟\n  !load [名称] — 从 saves 文件夹载入存档\n  h、help、!help — 显示此列表\n其他内容按 Lua 执行。",
+  "input_hint": "-- 例如 sim.partCreate(100, 100, elem.DEFAULT_PT_DUST)",
+  "no_output": "（暂无输出）",
+  "subtitle": "sim · elem · ren · evt — 脚本直接作用于当前运行的模拟",
+  "template_custom_element": "注册自定义元素",
+  "template_explosion_wave": "创建爆炸波",
+  "template_particle_ring": "生成粒子环",
+  "templates": "模板：",
+  "title": "Lua 控制台"
+}
