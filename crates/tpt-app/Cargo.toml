@@ -1,0 +1,34 @@
+[package]
+name = "tpt-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "winit + wgpu + egui-wgpu front-end for The Powder Toy (Rust + CubeCL)"
+
+[[bin]]
+name = "tpt-app"
+path = "src/main.rs"
+
+[dependencies]
+tpt-core = { workspace = true }
+tpt-sim = { workspace = true }
+tpt-save = { workspace = true }
+tpt-lua = { workspace = true }
+
+wgpu = { workspace = true }
+cubecl = { workspace = true }
+cubecl-wgpu = { workspace = true }
+cubecl-runtime = { workspace = true }
+
+winit = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+
+bytemuck = { workspace = true }
+png = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+pollster = { workspace = true }
+glam = { workspace = true }

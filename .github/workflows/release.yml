@@ -1,0 +1,123 @@
+name: release
+
+# Every tag push builds the three shipped binaries and publishes them as a
+# GitHub release. wgpu/CubeCL resolve the device at runtime, so the runners only
+# compile; the Linux job then runs the headless smoke test on a software Vulkan
+# device (`--headless-smoke`, the mode that exists for exactly this), which
+# exercises the whole kernel registry and render path without a GPU.
+on:
+  push:
+    tags: ['*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # MSVC, not the workstation's windows-gnu: the repository pins no
+          # toolchain and no linker paths, and MSVC's `link.exe` honours the
+          # COFF `/INCLUDE:` directives that keep the `linkme` kernel registry
+          # alive. The `-Wl,--no-gc-sections` workaround in `.cargo/config.toml`
+          # is scoped to `x86_64-pc-windows-gnu` and is not needed here.
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+            # A published .exe must not depend on the Visual C++ redistributable.
+            rustflags: -C target-feature=+crt-static
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ''
+            rustflags: ''
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ''
+            rustflags: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux windowing headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev
+
+      - name: Add target
+        run: rustup target add --toolchain stable ${{ matrix.target }}
+
+      - name: Build
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --locked -p tpt-app --target ${{ matrix.target }}
+
+      - name: Smoke test on a software Vulkan device
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+          ./target/${{ matrix.target }}/release/tpt-app --headless-smoke
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tpt-app-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/tpt-app${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 3
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zip
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p dist
+
+          # The exec bit does not survive the artifact round trip, so restore it
+          # before archiving; `zip` records it in the Unix attributes.
+          chmod +x artifacts/tpt-app-x86_64-unknown-linux-gnu/tpt-app
+          tar -C artifacts/tpt-app-x86_64-unknown-linux-gnu -czf \
+            "dist/tpt-app-${tag}-x86_64-linux.tar.gz" tpt-app
+
+          chmod +x artifacts/tpt-app-aarch64-apple-darwin/tpt-app
+          tar -C artifacts/tpt-app-aarch64-apple-darwin -czf \
+            "dist/tpt-app-${tag}-aarch64-macos.tar.gz" tpt-app
+
+          (cd artifacts/tpt-app-x86_64-pc-windows-msvc &&
+            zip -j "../../dist/tpt-app-${tag}-x86_64-windows.zip" tpt-app.exe)
+
+          ls -l dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "$tag" --generate-notes
+          fi

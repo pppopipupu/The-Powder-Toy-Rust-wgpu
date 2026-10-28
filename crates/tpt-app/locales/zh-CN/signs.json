@@ -1,0 +1,18 @@
+{
+  "anchor": "像素：{0}, {1}",
+  "cancel": "取消",
+  "char_count": "{0}/{1} 个字符",
+  "delete": "删除",
+  "justification": "对齐",
+  "justify_left": "左",
+  "justify_middle": "中",
+  "justify_none": "无",
+  "justify_right": "右",
+  "limit_reached": "最多只能放置 {0} 个标牌",
+  "link_failed": "无法在浏览器中打开 {0}",
+  "move": "移动",
+  "ok": "确定",
+  "placeholder": "[文本]",
+  "title_edit": "编辑标牌",
+  "title_new": "新建标牌"
+}

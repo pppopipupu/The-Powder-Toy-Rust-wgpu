@@ -1,0 +1,16 @@
+# Portable build wiring. Machine-specific settings (the MinGW-w64 linker paths
+# of a Windows workstation) do not belong here: cargo merges this file with
+# `$CARGO_HOME/config.toml`, which is where a given machine keeps its choice of
+# compiler. Nothing in this file affects MSVC, Linux or macOS builds.
+
+[target.x86_64-pc-windows-gnu]
+# CubeCL (through pliron) discovers every shader/type-interface implementation
+# with `linkme` distributed slices. On COFF, `#[used]` is expressed as a
+# `/INCLUDE:` linker directive, which MSVC's `link.exe` honours but GNU `ld`
+# silently ignores; combined with the `--gc-sections` rustc passes for this
+# target, the `.linkme_*` sections are discarded. The registry then comes up
+# nearly empty (148 of 2192 entries) and every kernel launch panics with
+# "Expected type cube.f32 to implement dyn SizedType". Turning section GC off
+# keeps those registrations alive; the size cost is debug-build only in
+# practice and is the price of a working GPU backend on windows-gnu.
+rustflags = ["-C", "link-arg=-Wl,--no-gc-sections"]

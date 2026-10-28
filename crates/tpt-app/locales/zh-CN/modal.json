@@ -1,0 +1,16 @@
+{
+  "cancel": "取消",
+  "confirm": "确认",
+  "dismiss": "关闭",
+  "error_title": "错误",
+  "load_action": "载入",
+  "load_hint": "例如：我的模拟",
+  "load_message": "输入 saves 文件夹中的存档名称。",
+  "load_title": "载入模拟",
+  "quit_message": "确定要退出游戏吗？",
+  "quit_title": "即将退出",
+  "save_action": "保存",
+  "save_hint": "例如：我的模拟",
+  "save_message": "输入 .tptrs 存档名称。",
+  "save_title": "保存模拟"
+}

@@ -1,0 +1,16 @@
+{
+  "cancel": "Cancel",
+  "confirm": "Confirm",
+  "dismiss": "Dismiss",
+  "error_title": "Error",
+  "load_action": "Load",
+  "load_hint": "e.g. my simulation",
+  "load_message": "Enter the name of a save in the saves folder.",
+  "load_title": "Load simulation",
+  "quit_message": "Are you sure you want to exit the game?",
+  "quit_title": "You are about to quit",
+  "save_action": "Save",
+  "save_hint": "e.g. my simulation",
+  "save_message": "Enter a name for the .tptrs save.",
+  "save_title": "Save simulation"
+}

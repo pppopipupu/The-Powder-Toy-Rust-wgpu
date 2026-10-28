@@ -1,0 +1,18 @@
+{
+  "anchor": "Pixel: {0}, {1}",
+  "cancel": "Cancel",
+  "char_count": "{0}/{1} characters",
+  "delete": "Delete",
+  "justification": "Alignment",
+  "justify_left": "Left",
+  "justify_middle": "Middle",
+  "justify_none": "None",
+  "justify_right": "Right",
+  "limit_reached": "At most {0} signs can be placed",
+  "link_failed": "Could not open {0} in the browser",
+  "move": "Move",
+  "ok": "OK",
+  "placeholder": "[message]",
+  "title_edit": "Edit sign",
+  "title_new": "New sign"
+}

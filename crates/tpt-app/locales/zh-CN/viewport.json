@@ -1,0 +1,13 @@
+{
+  "hud_canvas_parts": "画布: {0} | 活跃粒子: {1}",
+  "hud_cursor_empty": "光标: ({0}, {1}) [空]",
+  "hud_fps": "调试 HUD | FPS: {0}",
+  "hud_modes": "模式: R=0x{0} D=0x{1} C=0x{2}",
+  "hud_particle": "粒子: {0} 位于 ({1}, {2})",
+  "hud_particle_props": "温度: {0}K, 寿命: {1}, Ctype: {2}, Tmp: {3}, Tmp2: {4}",
+  "hud_rigid_bodies": "刚体: {0}",
+  "hud_toggles": "开关: deco={0} grid={1} checker={2} brush={3}",
+  "hud_vel_flags": "速度: ({0}, {1}), 标志: 0x{2}",
+  "hud_zoom": "缩放: enabled={0} factor={1} scope={2} win=({3},{4})",
+  "paused_hint": "已暂停"
+}
