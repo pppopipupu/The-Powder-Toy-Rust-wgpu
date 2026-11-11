@@ -23,7 +23,7 @@ A GPU-accelerated Rust port of *The Powder Toy*. Simulation passes and fancy ren
 
 ## Build and Run
 
-Requirements: Rust 1.95+ (edition 2024), a `wgpu`-capable GPU/driver (Vulkan, DX12, or Metal), and a C toolchain.
+Requirements: Rust 1.99.1+, a `wgpu`-capable GPU/driver (Vulkan, DX12, or Metal), and a C toolchain.
 
 ```bash
 cargo run --release -p tpt-app

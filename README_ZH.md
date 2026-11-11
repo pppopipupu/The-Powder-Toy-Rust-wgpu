@@ -23,7 +23,7 @@
 
 ## 构建与运行
 
-前置要求：Rust 1.95+（2024 edition）、支持 `wgpu` 的图形驱动（Vulkan / DX12 / Metal）以及 C 编译工具链。
+前置要求：Rust 1.99.1+、支持 `wgpu` 的图形驱动（Vulkan / DX12 / Metal）以及 C 编译工具链。
 
 ```bash
 cargo run --release -p tpt-app

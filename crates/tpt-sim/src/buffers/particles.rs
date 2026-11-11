@@ -1158,12 +1158,12 @@ fn filt_interact_wavelengths(tmp: i32, ctype: u32, temp: f32, orig_wl: u32, roll
         }
         // Red shift by the filter's lowest set wavelength.
         10 => {
-            let lsb = filt_wl & filt_wl.wrapping_neg();
+            let lsb = filt_wl.isolate_lowest_one();
             (orig_wl as u64 * lsb as u64) as u32 & MASK
         }
         // Blue shift by the filter's lowest set wavelength.
         _ => {
-            let lsb = filt_wl & filt_wl.wrapping_neg();
+            let lsb = filt_wl.isolate_lowest_one();
             orig_wl.checked_div(lsb).unwrap_or(orig_wl) & MASK
         }
     }

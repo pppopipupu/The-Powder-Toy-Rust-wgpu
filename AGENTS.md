@@ -117,7 +117,7 @@ and publishes `tpt-app-<tag>-<platform>` archives on a GitHub release.
 
 ## Runtime and Tooling
 
-- Toolchain: edition 2024, `rust-version = "1.95"`. No `rust-toolchain.toml` is committed, so a checkout builds with the host's default toolchain. This workstation's default is `stable-x86_64-pc-windows-gnu` and keeps its MinGW-w64 linker paths in `~/.cargo/config.toml`, never in the repository; CI builds `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` (`.github/workflows/release.yml`). Do not switch this workstation to `-msvc`: it has no Visual Studio Build Tools (`mlua` vendors Lua 5.4 and needs `cc`).
+- Toolchain: `rust-version = "1.99.1"`. No `rust-toolchain.toml` is committed, so a checkout builds with the host's default toolchain. This workstation's default is `stable-x86_64-pc-windows-gnu` and keeps its MinGW-w64 linker paths in `~/.cargo/config.toml`, never in the repository; CI builds `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` (`.github/workflows/release.yml`). Do not switch this workstation to `-msvc`: it has no Visual Studio Build Tools (`mlua` vendors Lua 5.4 and needs `cc`).
 - NEVER remove `-Wl,--no-gc-sections` from `.cargo/config.toml`: on `x86_64-pc-windows-gnu` GNU `ld` garbage-collects `linkme`'s kernel registry and every launch panics. MSVC (`/INCLUDE:` directives) and the ELF/Mach-O targets keep the registry without the flag, which is why CI does not carry it.
 - Keep `[profile.release]` at `lto = false` and `codegen-units = 16`; whole-program LTO and a single codegen unit make the CubeCL-heavy build disproportionately slow.
 - Workspace `cubecl*` dependencies use `default-features = false`; their defaults enable `persistence` and build the libSQL fork.
