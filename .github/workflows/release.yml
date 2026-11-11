@@ -12,7 +12,9 @@ on:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  # A re-pushed tag must supersede its own in-progress run: `false` left the
+  # newer commit waiting behind a stalled build for the same ref.
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
