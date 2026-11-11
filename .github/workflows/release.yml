@@ -18,6 +18,10 @@ jobs:
   build:
     name: build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # A cold CubeCL build is 8-15 min per target. Anything beyond this is a
+    # stalled transfer or a wedged runner, not compilation, so fail and let the
+    # tag be re-run instead of holding the job for the 360 min default.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +38,12 @@ jobs:
             # A published .exe must not depend on the Visual C++ redistributable.
             rustflags: -C target-feature=+crt-static
           - name: linux-x86_64
-            os: ubuntu-latest
+            # Pinned rather than `ubuntu-latest`: that label just migrated to
+            # the Ubuntu 26 ("resolute") image, and linking there raises the
+            # artifact's glibc floor above 24.04's 2.39, so the binary would
+            # refuse to start on older distributions. Pinning also keeps the apt
+            # mirror set from changing under a release build.
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             ext: ''
             rustflags: ''
@@ -46,19 +55,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Cold builds take 8-15 min per target; restoring `target/` and the
+      # registry keeps later tags to the changed crates only.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       - name: Install Linux windowing headers
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
+          apt=(sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15
+               -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true)
           for attempt in 1 2 3; do
-            if sudo apt-get update && sudo apt-get install -y -o Acquire::Retries=5 --no-install-recommends libxkbcommon-dev libwayland-dev; then
-              break
+            # An unbounded apt can outlive the job: one run failed on
+            # `Temporary failure resolving` and the next sat in this step for
+            # 35+ min after the runner's network stalled. `Acquire::Retries`
+            # does not cap a connect that never answers, so each command gets a
+            # hard deadline; `--kill-after` reaps an apt-get that ignores the
+            # first signal.
+            if timeout --kill-after=15 240 "${apt[@]}" update &&
+               timeout --kill-after=15 240 "${apt[@]}" install -y \
+                 --no-install-recommends libxkbcommon-dev libwayland-dev; then
+              exit 0
             fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep 5
+            echo "apt attempt $attempt failed; retrying" >&2
+            sleep 10
           done
+          exit 1
 
       - name: Update toolchain and add target
         run: |
@@ -80,28 +104,14 @@ jobs:
   release:
     name: publish release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
-
-      - name: Install zip
-        run: |
-          set -euo pipefail
-          if ! command -v zip >/dev/null 2>&1; then
-            for attempt in 1 2 3; do
-              if sudo apt-get update && sudo apt-get install -y -o Acquire::Retries=5 --no-install-recommends zip; then
-                break
-              fi
-              if [ "$attempt" -eq 3 ]; then
-                exit 1
-              fi
-              sleep 5
-            done
-          fi
 
       - name: Package
         run: |
@@ -110,7 +120,7 @@ jobs:
           mkdir -p dist
 
           # The exec bit does not survive the artifact round trip, so restore it
-          # before archiving; `zip` records it in the Unix attributes.
+          # before archiving; `tar` records it in the Unix mode.
           chmod +x artifacts/tpt-app-x86_64-unknown-linux-gnu/tpt-app
           tar -C artifacts/tpt-app-x86_64-unknown-linux-gnu -czf \
             "dist/tpt-app-${tag}-x86_64-linux.tar.gz" tpt-app
@@ -119,8 +129,12 @@ jobs:
           tar -C artifacts/tpt-app-aarch64-apple-darwin -czf \
             "dist/tpt-app-${tag}-aarch64-macos.tar.gz" tpt-app
 
+          # `python3 -m zipfile` instead of an `apt-get install zip` round trip:
+          # the interpreter ships with the image, so packaging never depends on
+          # a repo fetch. The exec bit is meaningless for a Windows .exe.
           (cd artifacts/tpt-app-x86_64-pc-windows-msvc &&
-            zip -j "../../dist/tpt-app-${tag}-x86_64-windows.zip" tpt-app.exe)
+            python3 -m zipfile -c \
+              "../../dist/tpt-app-${tag}-x86_64-windows.zip" tpt-app.exe)
 
           ls -l dist
 
