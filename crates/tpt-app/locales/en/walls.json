@@ -1,0 +1,21 @@
+{
+  "DEFAULT_WL_ERASE": "Erases walls.",
+  "DEFAULT_WL_CNDTW": "Blocks everything. Conductive.",
+  "DEFAULT_WL_EWALL": "E-Wall. Becomes transparent when electricity is connected.",
+  "DEFAULT_WL_DTECT": "Detector. Generates electricity when a particle is inside.",
+  "DEFAULT_WL_STRM": "Streamline. Creates a line that follows air movement.",
+  "DEFAULT_WL_FAN": "Fan. Accelerates air. Use the line tool to set direction and strength.",
+  "DEFAULT_WL_LIQD": "Allows liquids, blocks all other particles. Conductive.",
+  "DEFAULT_WL_ABSRB": "Absorbs particles but lets air currents through.",
+  "DEFAULT_WL_WALL": "Basic wall, blocks everything.",
+  "DEFAULT_WL_AIR": "Allows air, but blocks all particles.",
+  "DEFAULT_WL_POWDR": "Allows powders, blocks all other particles.",
+  "DEFAULT_WL_CNDTR": "Conductor. Allows all particles to pass through and conducts electricity.",
+  "DEFAULT_WL_EHOLE": "E-Hole. absorbs particles, releases them when powered.",
+  "DEFAULT_WL_GAS": "Allows gases, blocks all other particles.",
+  "DEFAULT_WL_GRVTY": "Gravity wall. Newtonian Gravity has no effect inside a box drawn with this.",
+  "DEFAULT_WL_ENRGY": "Allows energy particles, blocks all other particles.",
+  "DEFAULT_WL_NOAIR": "Allows all particles, but blocks air.",
+  "DEFAULT_WL_ERASEA": "Erases walls, particles, and signs.",
+  "DEFAULT_WL_STASIS": "Freezes particles inside the wall in place until powered."
+}

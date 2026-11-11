@@ -1,0 +1,21 @@
+{
+  "DEFAULT_WL_ERASE": "擦除墙体。",
+  "DEFAULT_WL_CNDTW": "阻挡一切。导电。",
+  "DEFAULT_WL_EWALL": "E-Wall。通电时变为透明。",
+  "DEFAULT_WL_DTECT": "检测器。内部有粒子时发电。",
+  "DEFAULT_WL_STRM": "流线。生成一条跟随气流运动的线。",
+  "DEFAULT_WL_FAN": "风扇。加速空气。用直线工具设置方向和强度。",
+  "DEFAULT_WL_LIQD": "只允许液体通过，阻挡其他所有粒子。导电。",
+  "DEFAULT_WL_ABSRB": "吸收粒子，但让气流通过。",
+  "DEFAULT_WL_WALL": "基础墙体，阻挡一切。",
+  "DEFAULT_WL_AIR": "允许空气通过，但阻挡所有粒子。",
+  "DEFAULT_WL_POWDR": "只允许粉末通过，阻挡其他所有粒子。",
+  "DEFAULT_WL_CNDTR": "导体。允许所有粒子通过并导电。",
+  "DEFAULT_WL_EHOLE": "E-Hole。吸收粒子，通电时释放。",
+  "DEFAULT_WL_GAS": "只允许气体通过，阻挡其他所有粒子。",
+  "DEFAULT_WL_GRVTY": "引力墙。用此墙围成的盒子内部不受牛顿引力影响。",
+  "DEFAULT_WL_ENRGY": "只允许能量粒子通过，阻挡其他所有粒子。",
+  "DEFAULT_WL_NOAIR": "允许所有粒子通过，但阻挡空气。",
+  "DEFAULT_WL_ERASEA": "擦除墙体、粒子和标牌。",
+  "DEFAULT_WL_STASIS": "把墙内的粒子冻结在原地，直到通电。"
+}

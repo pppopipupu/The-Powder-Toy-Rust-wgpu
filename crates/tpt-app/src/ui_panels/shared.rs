@@ -10,7 +10,7 @@ use tpt_core::elements::ElementDef;
 use tpt_core::particle::SimulationConfig;
 
 use crate::app_state::{AppState, CanvasSizePreset, SelectedTool};
-use crate::i18n::{t, t_fmt};
+use crate::i18n::{t, t_fmt, try_t};
 
 /// Background of the HUD panels.
 pub(super) const BG_PANEL: Color32 = Color32::from_rgb(24, 26, 32);
@@ -346,6 +346,19 @@ pub(super) fn element_name(state: &AppState, ty: u32) -> String {
         .unwrap_or_else(|| t_fmt("tools.tool_element_fallback", &[&ty.to_string()]))
 }
 
+/// Localized description of an element id.
+///
+/// TPT shows `Element::Description` as the palette tooltip
+/// (`src/simulation/elements/*.cpp`; `GameModel.cpp:1851-1852` copies it onto
+/// the `Tool` and `GameView.cpp:1304-1331` renders it). Built-in descriptions
+/// live in the `elements` locale module; a Lua-defined element has no key and
+/// keeps its scripted `ElementDef::description`.
+pub(super) fn element_description(state: &AppState, ty: u32) -> &str {
+    let definition = state.engine.registry.get(ty);
+    let key = format!("elements.{}", definition.identifier);
+    try_t(&key).unwrap_or(definition.description.as_str())
+}
+
 /// Base colour of an element id as `0x00RRGGBB`.
 pub(super) fn element_rgb(state: &AppState, ty: u32) -> u32 {
     element_def(state, ty)
@@ -362,6 +375,20 @@ pub(super) fn wall_name(state: &AppState, id: u8) -> &str {
         .find(|wall| wall.id == id)
         .map(|wall| wall.name.as_str())
         .unwrap_or(t("tools.tool_wall_fallback"))
+}
+
+/// Localized description of a wall id, matching [`element_description`].
+///
+/// Wall descriptions come from `default_walls()` and are keyed by the
+/// `DEFAULT_WL_*` identifier in the `walls` locale module.
+pub(super) fn wall_description(state: &AppState, id: u8) -> &str {
+    match state.engine.walls.iter().find(|wall| wall.id == id) {
+        Some(wall) => {
+            let key = format!("walls.{}", wall.identifier);
+            try_t(&key).unwrap_or(wall.description.as_str())
+        }
+        None => t("tools.tool_wall_fallback"),
+    }
 }
 
 /// Air pressure of the cell containing pixel `(x, y)`.
@@ -434,6 +461,7 @@ pub(super) fn rigid_shape_label(shape: RigidSpawnShape) -> &'static str {
 pub(super) fn element_button(
     ui: &mut Ui,
     definition: &ElementDef,
+    description: &str,
     selected: bool,
 ) -> egui::Response {
     let background = element_color(definition.colour);
@@ -449,7 +477,7 @@ pub(super) fn element_button(
     }
     ui.add(button).on_hover_ui(|ui| {
         ui.label(RichText::new(&definition.name).strong());
-        ui.label(&definition.description);
+        ui.label(description);
     })
 }
 

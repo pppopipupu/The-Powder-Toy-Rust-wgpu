@@ -97,6 +97,7 @@ pub fn is_obstacle(pmap: &[u32], xres: u32, yres: u32, x: i32, y: i32) -> bool {
 }
 
 pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
+    let control = bufs.stickman_control;
     let (cubes, dim) = launch_grid(dims.used_slots);
     unsafe {
         stickman_kernel::launch_unchecked(
@@ -123,6 +124,10 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
             dims.yres,
             dims.used_slots as u32,
             (dims.elem_len / 32) as u32,
+            control[0],
+            control[1],
+            control[2],
+            control[3],
         );
     }
 }

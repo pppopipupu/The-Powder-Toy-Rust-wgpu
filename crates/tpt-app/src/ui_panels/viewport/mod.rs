@@ -227,7 +227,7 @@ pub(super) fn draw_viewport(ui: &mut Ui, state: &mut AppState, sim_tex_id: Textu
                         input.key_down(Key::A) || input.key_down(Key::ArrowLeft),
                         input.key_down(Key::D) || input.key_down(Key::ArrowRight),
                     ),
-                    super::pressed_once(input, Key::Home),
+                    super::hotkeys::pressed_once(input, Key::Home),
                 )
             });
             if dir != Vec2::ZERO {

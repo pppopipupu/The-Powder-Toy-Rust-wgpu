@@ -209,6 +209,7 @@ impl SimBuffers {
             gpu_stkm_legs: grid.stkm_legs,
             gpu_stkm_accs: grid.stkm_accs,
             gpu_stkm_meta: grid.stkm_meta,
+            stickman_control: [0; 4],
 
             // Element tables: the host copies are filled by
             // `refresh_element_tables` right below.

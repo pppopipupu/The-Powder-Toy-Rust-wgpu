@@ -393,6 +393,12 @@ pub struct SimBuffers {
     /// Stickman metadata (`STKM_SLOTS * STKM_META_STRIDE` `u32`s:
     /// `spwn, comm, pcomm, elem, frames, rocket_boots, fan, spawn_id`).
     pub gpu_stkm_meta: Handle,
+    /// Host-owned live control words for the two player stickmen,
+    /// `[comm1, pcomm1, comm2, pcomm2]`. Ports
+    /// `Simulation::player.comm` / `player2.comm` (`Stickman.h:4-16`,
+    /// `GameController.cpp:611-730`). Passed to the stickman kernel as
+    /// scalars every tick so no full-state readback is needed.
+    pub stickman_control: [u32; 4],
 
     /// `GpuElementProps[PT_NUM]` uploaded once per registry change.
     pub gpu_elem_props: Handle,

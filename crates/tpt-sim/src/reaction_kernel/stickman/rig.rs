@@ -94,6 +94,10 @@ pub fn stickman_kernel(
     yres: u32,
     capacity: u32,
     elem_count: u32,
+    comm1: u32,
+    pcomm1: u32,
+    comm2: u32,
+    pcomm2: u32,
 ) {
     let id = ABSOLUTE_POS as u32;
     if id >= capacity {
@@ -218,7 +222,10 @@ pub fn stickman_kernel(
         );
     }
 
-    let comm = if ty == C_PT_FIGH {
+    // `GameController.cpp:611-730` owns `player.comm`/`player2.comm` on the
+    // host; the port passes both words as kernel scalars. Only the AI-driven
+    // FIGH words still live in the device table (`FIGH.cpp:150-152`).
+    let (comm, pcomm) = if ty == C_PT_FIGH {
         let fcomm = figh_ai_select_command(
             pmap,
             xres,
@@ -230,12 +237,14 @@ pub fn stickman_kernel(
             sid,
         );
         stkm_meta[mb + 1usize] = fcomm;
-        fcomm
+        (fcomm, stkm_meta[mb + 2usize])
+    } else if sid == C_STKM_PLAYER1 {
+        (comm1, pcomm1)
+    } else if sid == C_STKM_PLAYER2 {
+        (comm2, pcomm2)
     } else {
-        stkm_meta[mb + 1usize]
+        (stkm_meta[mb + 1usize], stkm_meta[mb + 2usize])
     };
-
-    let pcomm = stkm_meta[mb + 2usize];
     let rocket_boots = stkm_meta[mb + 5usize] != 0u32;
 
     stkm_meta[mb + 4usize] += 1u32;
@@ -537,7 +546,12 @@ pub fn stickman_kernel(
         terminate!();
     }
 
-    stkm_meta[mb + 2usize] = comm;
+    // `FIGH.cpp:150`: a fighter saves its command as `pcomm` for the next AI
+    // pass. Player `pcomm` comes from the host (snapshotted on a left/right
+    // key release, `GameController.cpp:704-705`), so it is never overwritten.
+    if ty == C_PT_FIGH {
+        stkm_meta[mb + 2usize] = comm;
+    }
 }
 
 #[cfg(test)]

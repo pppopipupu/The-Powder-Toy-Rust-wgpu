@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use egui::{Color32, RichText, Ui};
 use tpt_core::elements::MenuCategory;
 
-use crate::app_state::{AppState, STAMPS_DIR, format_save_time};
+use crate::app_state::{AppState, STAMPS_DIR, SelectedTool, format_save_time};
 use crate::i18n::{t, t_fmt};
 
-use super::shared::{TEXT_DIM, tool_label};
+use super::shared::{ACCENT, TEXT_DIM, element_def, element_description, tool_label};
 
 /// TPT menu sections in `msections` order (`SimulationData.cpp:79-95`), plus
 /// the port-only rigid-body list appended at the end.
@@ -94,6 +94,26 @@ pub(super) fn draw_side_bar(ui: &mut Ui, state: &mut AppState) {
             .small()
             .color(TEXT_DIM),
     );
+
+    // `GameModel.cpp:1851-1852` puts `Element::Description` on the tool and
+    // `GameView.cpp:1304-1331` renders it as the palette tooltip while the
+    // pointer is over an element chip. Port addition: keep the same
+    // introduction visible here after the pick, so a selected element is
+    // described without hovering a small palette button.
+    if let SelectedTool::Element(ty) = state.primary_tool
+        && let Some(definition) = element_def(state, ty)
+    {
+        ui.add_space(4.0);
+        ui.label(RichText::new(&definition.name).strong().color(ACCENT));
+        ui.add(
+            egui::Label::new(
+                RichText::new(element_description(state, ty))
+                    .small()
+                    .color(TEXT_DIM),
+            )
+            .wrap(),
+        );
+    }
 
     // The element search is a floating HUD window (`GameView.cpp:325-328`
     // opens it from the simulation view); it is drawn here so the whole HUD

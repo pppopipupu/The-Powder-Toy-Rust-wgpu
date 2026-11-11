@@ -44,7 +44,8 @@ use crate::i18n::t;
 use super::bottom_bar::RIGID_MATERIALS;
 use super::shared::{
     DECO_TOOL_BUTTONS, GUI_TOOL_BUTTONS, SIM_TOOL_BUTTONS, TEXT_DIM, contrasting_text,
-    deco_tool_colour, element_color, element_name, element_rgb, menu_visible, rigid_shape_label,
+    deco_tool_colour, element_color, element_description, element_name, element_rgb, menu_visible,
+    rigid_shape_label, wall_description,
 };
 use super::side_bar::category_label;
 
@@ -394,14 +395,14 @@ impl Candidate {
                 let definition = state.engine.registry.get(ty);
                 [
                     Cow::Borrowed(definition.name.as_str()),
-                    Cow::Borrowed(definition.description.as_str()),
+                    Cow::Borrowed(element_description(state, ty)),
                     Cow::Borrowed(category_label(definition.category)),
                 ]
             }
             Self::Wall(id) => match state.engine.walls.iter().find(|wall| wall.id == id) {
                 Some(wall) => [
                     Cow::Borrowed(wall.name.as_str()),
-                    Cow::Borrowed(wall.description.as_str()),
+                    Cow::Borrowed(wall_description(state, id)),
                     Cow::Borrowed(t("side_bar.cat_walls")),
                 ],
                 None => [
@@ -439,14 +440,14 @@ impl Candidate {
                 let definition = state.engine.registry.get(ty);
                 Row {
                     name: definition.name.clone(),
-                    description: definition.description.clone(),
+                    description: element_description(state, ty).to_string(),
                     colour: definition.colour,
                 }
             }
             Self::Wall(id) => match state.engine.walls.iter().find(|wall| wall.id == id) {
                 Some(wall) => Row {
                     name: wall.name.clone(),
-                    description: wall.description.clone(),
+                    description: wall_description(state, id).to_string(),
                     colour: wall.colour,
                 },
                 None => Row {

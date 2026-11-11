@@ -120,6 +120,15 @@ impl SimulationEngine {
             SimCommand::InvertAir => self.invert_air(),
             SimCommand::ResetAmbientHeat => self.reset_ambient_heat(),
             SimCommand::SparkAt { x, y } => self.spark_at(x, y),
+            SimCommand::SetStickmanControl {
+                player,
+                comm,
+                pcomm,
+            } => {
+                let p = usize::from(player.min(1)) * 2;
+                self.bufs.stickman_control[p] = comm;
+                self.bufs.stickman_control[p + 1] = pcomm;
+            }
         }
     }
 }

@@ -130,6 +130,21 @@ const MODULES: &[Module] = &[
         en: include_str!("../locales/en/tools.json"),
         zh_cn: include_str!("../locales/zh-CN/tools.json"),
     },
+    // Element and wall descriptions copied from the reference element table
+    // (`src/simulation/elements/*.cpp` `Description` assignments, surfaced as
+    // tooltips by `GameModel.cpp:1851-1852`). Keys are the stable
+    // `DEFAULT_PT_*` / `DEFAULT_WL_*` identifiers, so a Lua-defined element
+    // simply has no key and falls back to its own `description`.
+    Module {
+        name: "elements",
+        en: include_str!("../locales/en/elements.json"),
+        zh_cn: include_str!("../locales/zh-CN/elements.json"),
+    },
+    Module {
+        name: "walls",
+        en: include_str!("../locales/en/walls.json"),
+        zh_cn: include_str!("../locales/zh-CN/walls.json"),
+    },
     Module {
         name: "voxel3d",
         en: include_str!("../locales/en/voxel3d.json"),
@@ -181,21 +196,28 @@ pub fn set_language(language: Language) {
     LANGUAGE.with(|current| current.set(language as u8));
 }
 
+/// Text for `key` in the active language, or `None` when it is untranslated.
+///
+/// Falls back to English; unlike [`t`] a miss stays a miss so callers can
+/// supply their own fallback (Lua-defined elements carry a scripted
+/// description in `ElementDef`).
+pub fn try_t(key: &str) -> Option<&'static str> {
+    let tables: &'static [Table; 2] = &TABLES;
+    tables[language().index()]
+        .get(key)
+        .or_else(|| tables[0].get(key))
+        .map(String::as_str)
+}
+
 /// Text for `key` in the active language.
 ///
 /// Falls back to English, then to `key` itself: an untranslated or mistyped key
 /// is visible in the interface instead of silently blank.
 pub fn t(key: &str) -> &str {
-    // The tables live in a `static`, so a borrow of them is `'static` and
-    // outlives any caller's `'a`.
-    let tables: &'static [Table; 2] = &TABLES;
-    if let Some(text) = tables[language().index()].get(key) {
-        return text;
+    match try_t(key) {
+        Some(text) => text,
+        None => key,
     }
-    if let Some(text) = tables[0].get(key) {
-        return text;
-    }
-    key
 }
 
 /// [`t`] with `{0}`, `{1}`, ... replaced by `args`.
@@ -249,6 +271,54 @@ mod tests {
             t("no_such_module.no_such_key"),
             "no_such_module.no_such_key"
         );
+    }
+
+    /// Every built-in element and wall has a description in both languages.
+    /// The registry and the wall table are the authoritative key lists; a new
+    /// element without a translation must fail here rather than show an English
+    /// string inside the Chinese interface.
+    #[test]
+    fn every_builtin_description_is_translated() {
+        use tpt_core::elements::ElementRegistry;
+        use tpt_core::walls::default_walls;
+
+        let tables = &*TABLES;
+        for definition in &ElementRegistry::new_default().elements {
+            if !definition.identifier.starts_with("DEFAULT_PT_") {
+                continue;
+            }
+            let key = format!("elements.{}", definition.identifier);
+            for (index, table) in tables.iter().enumerate() {
+                assert!(
+                    table.contains_key(&key),
+                    "language {} misses {key}",
+                    Language::ALL[index].code()
+                );
+            }
+        }
+        for wall in default_walls() {
+            let key = format!("walls.{}", wall.identifier);
+            for (index, table) in tables.iter().enumerate() {
+                assert!(
+                    table.contains_key(&key),
+                    "language {} misses {key}",
+                    Language::ALL[index].code()
+                );
+            }
+        }
+    }
+
+    /// The element descriptions are real translations, not the same English
+    /// text copied into both files (except name-like jokes such as `LOLZ`).
+    #[test]
+    fn element_descriptions_are_localized() {
+        let english = t("elements.DEFAULT_PT_DUST").to_string();
+        set_language(Language::ZhCn);
+        let chinese = t("elements.DEFAULT_PT_DUST").to_string();
+        set_language(Language::En);
+        assert_eq!(english, "Very light dust. Flammable.");
+        assert_ne!(english, chinese);
+        assert!(!chinese.is_ascii());
     }
 
     #[test]

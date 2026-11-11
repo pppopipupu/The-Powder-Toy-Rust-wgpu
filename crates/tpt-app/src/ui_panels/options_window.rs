@@ -369,6 +369,8 @@ const KEYBINDS: &[(&str, &str)] = &[
     ("options.controls_view_pan", "options.bind_wasd_arrows"),
     ("options.controls_view_zoom", "options.bind_wheel"),
     ("options.controls_reset_view", "options.bind_home"),
+    ("options.controls_stickman_1", "options.bind_arrows"),
+    ("options.controls_stickman_2", "options.bind_wasd"),
 ];
 
 /// 3D sandbox action/binding rows, appended to the key table under a heading.

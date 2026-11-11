@@ -16,7 +16,8 @@ use crate::i18n::{t, t_fmt};
 
 use super::shared::{
     DECO_TOOL_BUTTONS, GUI_TOOL_BUTTONS, SIM_TOOL_BUTTONS, TEXT_DIM, deco_tool_colour,
-    element_button, element_name, element_rgb, menu_visible, rigid_shape_label, tool_button,
+    element_button, element_description, element_name, element_rgb, menu_visible,
+    rigid_shape_label, tool_button, wall_description,
 };
 
 /// TPT's `GOLTool` (`ToolGOL.cpp`): label `CUST`, colour `0xFEA900`.
@@ -124,8 +125,13 @@ fn draw_tool_grid(ui: &mut Ui, state: &mut AppState) {
                     }
                     let selected = primary == SelectedTool::Wall(wall.id)
                         || secondary == SelectedTool::Wall(wall.id);
-                    let response =
-                        tool_button(ui, &wall.name, wall.colour, &wall.description, selected);
+                    let response = tool_button(
+                        ui,
+                        &wall.name,
+                        wall.colour,
+                        wall_description(state, wall.id),
+                        selected,
+                    );
                     if response.clicked() {
                         assignment = Some((false, SelectedTool::Wall(wall.id)));
                     }
@@ -326,7 +332,12 @@ fn draw_tool_grid(ui: &mut Ui, state: &mut AppState) {
                     }
                     let selected = primary == SelectedTool::Element(definition.id)
                         || secondary == SelectedTool::Element(definition.id);
-                    let response = element_button(ui, definition, selected);
+                    let response = element_button(
+                        ui,
+                        definition,
+                        element_description(state, definition.id),
+                        selected,
+                    );
                     if response.clicked() {
                         assignment = Some((false, SelectedTool::Element(definition.id)));
                     }

@@ -490,6 +490,21 @@ pub enum SimCommand {
         /// Pixel y coordinate.
         y: i32,
     },
+    /// Set the live command word of a player stickman.
+    ///
+    /// Ports `GameController::KeyPress` / `KeyRelease` writing
+    /// `sim->player.comm` / `sim->player2.comm`
+    /// (`GameController.cpp:611-730`): bits `0x01` left, `0x02` right,
+    /// `0x04` jump, `0x08` use element. `pcomm` is the direction word
+    /// saved when a left/right key is released.
+    SetStickmanControl {
+        /// `0` = `STKM` (arrow keys), `1` = `STKM2` (WASD).
+        player: u8,
+        /// Current command bits.
+        comm: u32,
+        /// Previous command word (element-spawn direction memory).
+        pcomm: u32,
+    },
 }
 
 #[cfg(test)]

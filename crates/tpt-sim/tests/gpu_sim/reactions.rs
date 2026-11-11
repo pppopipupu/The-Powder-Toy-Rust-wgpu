@@ -1235,16 +1235,6 @@ fn test_photon_reflection_filters_wavelengths() {
     let slot = (0..engine.bufs.capacity)
         .find(|&s| engine.bufs.part_ty[s] == PT_PHOT)
         .expect("the photon must survive bouncing off gold");
-    eprintln!(
-        "DEBUG photon slot={slot} x={} y={} vx={} vy={} ctype={:#x} pmap60={:#x} gold_ty={}",
-        engine.bufs.part_x[slot],
-        engine.bufs.part_y[slot],
-        engine.bufs.part_vx[slot],
-        engine.bufs.part_vy[slot],
-        engine.bufs.part_ctype[slot],
-        engine.bufs.pmap[40 * 120 + 60],
-        PT_GOLD
-    );
     assert_eq!(
         engine.bufs.part_ctype[slot], 0x3C03_8100,
         "the reflected wavelength must be filtered by gold's reflect mask"
@@ -1581,46 +1571,6 @@ fn test_proton_discharges_a_spark_without_killing_it() {
         "the caller adds 44 frames of life to the restored conductor ({})",
         engine.bufs.part_life[spark]
     );
-}
-
-#[test]
-fn tmp_probe_phot_look() {
-    let _guard = gpu_lock();
-    let mut engine = create_test_engine(160, 96);
-    engine.config_mut().gravity_mode = GravityMode::Off;
-    // White photon (brush default) and a red one.
-    engine.apply_command(SimCommand::PlaceParticles {
-        points: vec![(40, 40)],
-        elem_ty: PT_PHOT,
-        replace_mode: true,
-        dcolour: 0,
-    });
-    let id = (0..engine.bufs.capacity)
-        .find(|&i| engine.bufs.part_ty[i] == PT_PHOT)
-        .unwrap();
-    println!(
-        "phot default: life={} ctype=0x{:08X} temp={}",
-        engine.bufs.part_life[id], engine.bufs.part_ctype[id], engine.bufs.part_temp[id]
-    );
-    engine.apply_command(SimCommand::PlaceParticles {
-        points: vec![(80, 40)],
-        elem_ty: PT_PHOT,
-        replace_mode: true,
-        dcolour: 0,
-    });
-    let red = (0..engine.bufs.capacity)
-        .find(|&i| engine.bufs.part_ty[i] == PT_PHOT && i != id)
-        .unwrap();
-    engine.bufs.part_ctype[red] = 0x3FFC_0000; // red band only
-    engine.bufs.mark_particle_slot_dirty(red);
-    let rgba = engine.render_rgba();
-    let at = |x: usize, y: usize| {
-        let i = (y * 160 + x) * 4;
-        (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3])
-    };
-    println!("white pixel (40,40) = {:?}", at(40, 40));
-    println!("red pixel   (80,40) = {:?}", at(80, 40));
-    println!("bg          (10,10) = {:?}", at(10, 10));
 }
 
 /// `O2.cpp:80-123`: white-hot, over-pressured oxygen in a strong Newtonian

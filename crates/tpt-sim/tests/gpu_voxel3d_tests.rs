@@ -1,4 +1,8 @@
-//! GPU integration test for the 3D voxel core foundation (M0).
+//! Opt-in GPU diagnostics for the 3D voxel core foundation (M0).
+//!
+//! Gated by `required-features = ["diagnostics"]`: this verifies
+//! infrastructure (allocation size, indirect dispatch), not element behaviour,
+//! so it stays out of the default regression suite.
 //!
 //! The test drives the real CubeCL/wgpu stack: a raw `wgpu::Instance`,
 //! adapter and device are created with `adapter.limits()` and handed to CubeCL

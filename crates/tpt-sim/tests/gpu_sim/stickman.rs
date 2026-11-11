@@ -78,3 +78,38 @@ fn stickman_position(engine: &SimulationEngine, ty: u32) -> Option<(i32, i32)> {
         )
     })
 }
+
+/// `GameController.cpp:611-730` -> `STKM.cpp:277-287`: a command bit must
+/// actually move the stickman. The port used to leave `player.comm` at zero
+/// forever, so arrow keys/WASD did nothing.
+#[test]
+fn test_stickman_responds_to_player_command() {
+    let _guard = gpu_lock();
+    let mut engine = create_test_engine(64, 64);
+    engine.config_mut().gravity_mode = GravityMode::Off;
+
+    engine.apply_command(SimCommand::PlaceParticles {
+        points: vec![(30, 30)],
+        elem_ty: PT_STKM,
+        replace_mode: false,
+        dcolour: 0,
+    });
+    step(&mut engine);
+    let (start, _) = stickman_position(&engine, PT_STKM).expect("the stickman must exist");
+
+    engine.apply_command(SimCommand::SetStickmanControl {
+        player: 0,
+        comm: 0x02,
+        pcomm: 0x02,
+    });
+    // `rig.rs` also keeps the rig falling, so stop before it reaches the
+    // off-screen kill margin of this tiny 64x64 canvas.
+    for _ in 0..4 {
+        step(&mut engine);
+    }
+    let (end, _) = stickman_position(&engine, PT_STKM).expect("the stickman must survive");
+    assert!(
+        end > start + 2,
+        "the right command must move the stickman rightwards, got {start} -> {end}"
+    );
+}

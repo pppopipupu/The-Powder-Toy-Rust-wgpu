@@ -7,14 +7,17 @@
 //! and `ui_panels`; this module is deliberately UI-framework agnostic.
 //!
 //! The type definitions live here; the [`AppState`] behaviour lives in
-//! `commands`, the canvas dialog types in `canvas_dialog`, the bound-tool
-//! enum in `tool`, the canvas sign editor in `signs`, the stamp files in
-//! `stamps`, the decoration colour picker in `colour` and the 3D sandbox
-//! state (mode, palette, undo log, save browser) in `voxel`.
+//! `commands` (lifecycle, save/load, stepping, preferences) and `inspector`
+//! (cached device probes and wall samples), the canvas dialog types in
+//! `canvas_dialog`, the bound-tool enum in `tool`, the canvas sign editor in
+//! `signs`, the stamp files in `stamps`, the decoration colour picker in
+//! `colour` and the 3D sandbox state (mode, palette, undo log, save browser)
+//! in `voxel`.
 
 mod canvas_dialog;
 mod colour;
 mod commands;
+mod inspector;
 mod property;
 pub mod selection;
 mod signs;

@@ -8,10 +8,10 @@
 //! cannot choose `CubeCount::Static` and instead hands the count buffer to
 //! [`CubeCount::Dynamic`].
 //!
-//! [`run_indirect_probe`] is the smallest kernel that exercises that path: one
-//! thread per workgroup copying one word. It exists so the integration test can
-//! prove, without the simulation kernels, that the wgpu backend really honours
-//! a buffer-supplied grid size.
+//! This module is gated behind the `diagnostics` feature: [`run_indirect_probe`]
+//! is an opt-in white-box smoke check proving the wgpu backend honours a
+//! buffer-supplied grid size without running any simulation kernel. The real
+//! passes launch the same way with `sim_count`.
 
 use cubecl::client::Client;
 use cubecl::prelude::*;

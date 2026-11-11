@@ -1,7 +1,7 @@
 use tpt_core::elements::ElementRegistry;
 use tpt_core::particle::GpuParticle;
 
-use crate::app_state::commands::WallSample;
+use crate::app_state::inspector::WallSample;
 use crate::app_state::{AppState, SelectedTool, persist_tool_settings};
 use crate::prefs::Prefs;
 

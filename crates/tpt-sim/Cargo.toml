@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 description = "GPU (CubeCL + wgpu) simulation core for the Rust Powder Toy rewrite"
 
+[features]
+# Opt-in M0 infrastructure probes (256^3 allocation, indirect dispatch and
+# CubeCL/wgpu storage binding). These are white-box smoke checks from the 3D
+# foundation milestone, not element behaviour, so they stay out of the default
+# regression suite.
+diagnostics = []
+
 [dependencies]
 tpt-core = { workspace = true }
 cubecl = { workspace = true }
@@ -19,3 +26,11 @@ glam = { workspace = true }
 [dev-dependencies]
 pollster = { workspace = true }
 wgpu = { workspace = true }
+
+[[test]]
+name = "gpu_voxel3d_tests"
+required-features = ["diagnostics"]
+
+[[test]]
+name = "gpu_voxel3d_render_tests"
+required-features = ["diagnostics"]

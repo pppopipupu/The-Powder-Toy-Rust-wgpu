@@ -1,4 +1,8 @@
-//! Offscreen validation of the M0 3D world-OBB render pass.
+//! Opt-in offscreen diagnostics for the M0 3D world-OBB render pass.
+//!
+//! Gated by `required-features = ["diagnostics"]`: a white-box check of the
+//! CubeCL/wgpu storage-binding path, not element behaviour, so it stays out
+//! of the default regression suite.
 //!
 //! The test drives the real `wgpu` device and a CubeCL client registered on
 //! that same device (the same bring-up used by `gpu_sim_tests.rs`). Seven
