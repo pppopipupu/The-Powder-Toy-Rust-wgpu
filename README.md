@@ -2,7 +2,7 @@
 
 English | [简体中文](README_ZH.md)
 
-> **Work in Progress:** This project is still under active development. Some upstream content may not yet be ported, and performance issues may occur.
+> **Work in Progress:** This project is still under active development. Some upstream content may not yet be ported, performance issues may occur, and upstream saves are not compatible.
 
 A GPU-accelerated Rust port of *The Powder Toy*. Simulation passes and fancy rendering execute as CubeCL compute kernels on `wgpu`, paired with a `winit` and `egui-wgpu` desktop front end.
 
@@ -19,7 +19,7 @@ A GPU-accelerated Rust port of *The Powder Toy*. Simulation passes and fancy ren
 - **Configurable canvas sizes**: Supports presets from `612x384` up to `1600x900` and custom sizes (`128..=2048` in the menu, 4 px cell aligned) rather than a fixed `612x384` grid.
 - **2D pixel-cluster rigid bodies**: Adds a `RigidBodies` category (`RigidBody2D`) simulating destructible particle clusters on the GPU with sub-stepped contacts and per-pixel thermal/chemical fracture back into free particles.
 - **3D voxel sandbox (WIP)**: Adds an independent `256x256x256` GPU voxel sandbox with sparse active-brick indirect dispatch, a `64^3` air/pressure grid, 6-DOF rigid voxel bodies, and volumetric DDA rendering.
-- **Local-first saves, APNG & i18n**: Uses local zlib-compressed `.tptrs` (2D) / `.tpt3` (3D) snapshots and local `./saves/` / `./stamps/` instead of `.cps` and online community save servers; encodes recordings directly as `.apng` instead of frame-by-frame PPM images; adds English and Simplified Chinese (`zh-CN`) UI localization.
+- **Local-first saves, APNG & i18n**: Uses local zlib-compressed `.tptrs` (2D) / `.tpt3` (3D) snapshots and local `./saves/` / `./stamps/` (incompatible with upstream `.cps` / `.stm` formats and online save servers); encodes recordings directly as `.apng` instead of frame-by-frame PPM images; adds English and Simplified Chinese (`zh-CN`) UI localization.
 
 ## Build and Run
 
