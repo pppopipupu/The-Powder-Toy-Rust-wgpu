@@ -6,6 +6,9 @@ name: release
 on:
   push:
     tags: ['*']
+  # Lets a workflow change be compiled on the default branch before a tag is
+  # cut, without publishing anything (the `release` job only runs on tags).
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -61,28 +64,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Linux windowing headers
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          apt=(sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15
-               -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true)
-          for attempt in 1 2 3; do
-            # An unbounded apt can outlive the job: one run failed on
-            # `Temporary failure resolving` and the next sat in this step for
-            # 35+ min after the runner's network stalled. `Acquire::Retries`
-            # does not cap a connect that never answers, so each command gets a
-            # hard deadline; `--kill-after` reaps an apt-get that ignores the
-            # first signal.
-            if timeout --kill-after=15 240 "${apt[@]}" update &&
-               timeout --kill-after=15 240 "${apt[@]}" install -y \
-                 --no-install-recommends libxkbcommon-dev libwayland-dev; then
-              exit 0
-            fi
-            echo "apt attempt $attempt failed; retrying" >&2
-            sleep 10
-          done
-          exit 1
+      # No apt step: winit resolves wayland through `wayland-backend/dlopen`
+      # (winit's default `wayland-dlopen`) and xkbcommon through `xkbcommon-dl`,
+      # both of which load the system .so at runtime, so nothing is linked
+      # against libwayland or libxkbcommon at build time. Installing the -dev
+      # headers anyway made every Linux release depend on the Ubuntu mirrors,
+      # which is what stalled two runs there for 36 min and failed a third.
 
       - name: Update toolchain and add target
         run: |
@@ -104,6 +91,7 @@ jobs:
   release:
     name: publish release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
