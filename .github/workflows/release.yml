@@ -46,7 +46,7 @@ jobs:
             ext: ''
             rustflags: ''
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux windowing headers
         if: runner.os == 'Linux'
@@ -70,7 +70,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
           ./target/${{ matrix.target }}/release/tpt-app --headless-smoke
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tpt-app-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/tpt-app${{ matrix.ext }}
@@ -84,7 +84,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -115,6 +115,7 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
