@@ -8,7 +8,7 @@
 //! (`Simulation.cpp:277-321`).
 
 use tpt_core::commands::RegionAir;
-use tpt_core::constants::{CELL, PT_NONE};
+use tpt_core::constants::{CELL, PT_NONE, is_mod_element};
 use tpt_core::particle::GpuParticle;
 use tpt_core::sign::Sign;
 
@@ -51,6 +51,12 @@ impl SimulationEngine {
         self.bufs.reserve_particles(particles.len());
         for particle in particles {
             if particle.ty == PT_NONE {
+                continue;
+            }
+            // Stamping a region is still a user placement even though it uses
+            // `SkipChecks`, so the mod switch refuses to paste the elements it
+            // hides. Loading a save never goes through here and keeps them.
+            if is_mod_element(particle.ty) && !self.bufs.config.mod_elements_enabled {
                 continue;
             }
             // `Simulation.cpp:120-121`: `int(floor(tempPart.x + 0.5f))`.

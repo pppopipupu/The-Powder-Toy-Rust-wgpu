@@ -359,11 +359,12 @@ mod tests {
 ///
 /// `BTRY.cpp:48-76` sparks every conductor in the battery's radius-2 diamond
 /// (`abs(rx)+abs(ry) < 4`) that is idle and neither insulated nor one of the
-/// water family / thermistors / `INWR`. `PSNS.cpp` and `LSNS.cpp` do the same
-/// for their own conditions. Expressed receiver-side that is one branch per
-/// conductor pixel, so no thread ever writes another pixel's element and no
-/// `pmap` entry has to be updated. Also runs the thermistor self cooling of
-/// `NTCT.cpp` / `PTCT.cpp` and `SPRK.cpp`'s `case PT_NBLE`.
+/// water family / thermistors / `INWR` / `FNTC` / `FPTC`. `PSNS.cpp` and
+/// `LSNS.cpp` do the same for their own conditions but keep only the water
+/// family / thermistor / `INWR` exclusions. Expressed receiver-side that is one
+/// branch per conductor pixel, so no thread ever writes another pixel's element
+/// and no `pmap` entry has to be updated. Also runs the thermistor self cooling
+/// of `NTCT.cpp` / `PTCT.cpp` and `SPRK.cpp`'s `case PT_NBLE`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn source_ignition_kernel(
@@ -450,7 +451,12 @@ pub(crate) fn source_ignition_kernel(
                                         // conductor, recording its own type in
                                         // `ctype` and a fresh four-frame life.
                                         if nty == PT_BTRY && iabs(dx) + iabs(dy) < 4i32 {
-                                            fired = true;
+                                            // `BTRY.cpp:65` also excludes the
+                                            // thermistors `FNTC`/`FPTC`;
+                                            // `PSNS.cpp` and `LSNS.cpp` do not.
+                                            if ty != PT_FNTC && ty != PT_FPTC {
+                                                fired = true;
+                                            }
                                         } else if nty == PT_PSNS {
                                             let mode = part_tmp[nslot];
                                             let limit = part_temp[nslot] - 273.15f32;

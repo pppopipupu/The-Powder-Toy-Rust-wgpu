@@ -17,6 +17,7 @@
 //! | [`electronics`] | the electrical layer: staged spark conduction, switches, powered devices, storage, sensors (`FILT` serialisation), arcs, `ETRD` plasma bolts |
 //! | [`nuclear`] | decay chains, shields, isotopes, `PTNM`, `PROT`, viruses, `WARP`, converters |
 //! | [`special`] | force/pressure materials, plants, residue powders, `DMG`, `SEED` / `VINE`, refraction, `QRTZ`, photon sources |
+//! | [`modext`] | the second element set (`PT_FNTC`..`PT_MGNT`, ids `195..=238`), grouped by subsystem; launchers are scaffolding for its phase-2 kernels |
 //! | [`love`] | the `LOVE` / `LOLZ` 9x9 rule-table blocks |
 //! | [`force`] | gather-model `ACEL` / `DCEL` / `HEAC` / `RPEL` / `FRAY`, magnets, projectiles |
 //! | [`pipe`] | staged `PIPE` / `PPIP` handshake transport and pumps |
@@ -64,10 +65,12 @@ mod electronics;
 mod energy;
 pub(crate) mod energy_entry;
 mod fluid;
+mod flood_component;
 mod force;
 mod glow;
 mod life;
 mod love;
+mod modext;
 mod neut;
 mod nuclear;
 mod pipe;
@@ -573,30 +576,30 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     }
 
     // `BANG.cpp:74-80`: `flood_prop(x, y, FIELD_TMP, 2)` arms the whole
-    // connected run of `BANG` in one call. A dispatch carries the mark a single
-    // 4-connected hop, so the flood runs `BANG_FLOOD_ROUNDS` times per frame —
-    // the `pipe::pipe_flood_kernel` cascade pattern. The mark is monotone and
-    // stays on the armed pixels, so a charge wider than the per-frame reach
-    // still converges on the following frames. The flood writes the
-    // `BANG_ARMED_NEXT_FRAME` / `BANG_REARMED` sentinels rather than the final
-    // `2`, because it runs before the explosive pass: `explosive_reaction_kernel`
-    // turns them into `2`, and only the pixels that were already at `2` advance
-    // to `3` this frame, so a run armed by the flood detonates on the same tick
-    // as the seed that started it.
-    for _ in 0..combustion::BANG_FLOOD_ROUNDS {
-        unsafe {
-            combustion::bang_flood_kernel::launch_unchecked(
-                &bufs.client,
-                CubeCount::Static(cubes, 1, 1),
-                CubeDim::new_1d(dim),
-                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-                dims.xres,
-                dims.yres,
-            );
-        }
-    }
+    // connected run of `BANG` in one call. `flood_component`'s seed scan queues
+    // every fresh seed (`tmp == 1`) and its drain walks the 4-connected run in
+    // the same frame. The drain writes the `BANG_ARMED_NEXT_FRAME` /
+    // `BANG_REARMED` sentinels rather than the final `2`, because it runs
+    // before the explosive pass: `explosive_reaction_kernel` turns them into
+    // `2`, and only the pixels that were already at `2` advance to `3` this
+    // frame, so a run armed by the flood detonates on the same tick as the seed
+    // that started it.
+    flood_component::launch_seed_scan(
+        bufs,
+        dims,
+        flood_component::FLOOD_FIELD_TMP,
+        1i32,
+        1i32,
+        PT_BANG,
+    );
+    flood_component::launch_drain(
+        bufs,
+        dims,
+        flood_component::FLOOD_MODE_BANG,
+        PT_BANG,
+        combustion::BANG_ARMED_NEXT_FRAME,
+        combustion::BANG_REARMED,
+    );
 
     // Explosives and fuses.
     unsafe {
@@ -1150,6 +1153,9 @@ pub fn step_reactions_gpu(bufs: &mut SimBuffers, registry: &ElementRegistry, fra
     launch_electronics_passes(bufs, &dims);
     nuclear::launch(bufs, &dims);
     special::launch(bufs, &dims);
+    // The second element set (ids `195..=238`). It runs before the force gather
+    // and before the spawn expansion, so its creations drain in this tick.
+    modext::launch(bufs, &dims, frame_seed);
     force::launch(bufs, &dims);
     pipe::launch(bufs, &dims);
     spawn::expand_spawn_requests(bufs, &dims);

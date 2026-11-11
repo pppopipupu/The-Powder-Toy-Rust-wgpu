@@ -174,6 +174,15 @@ pub struct SimulationConfig {
     pub aheat_enable: bool,
     /// Whether the prettier (slower) powder rendering is enabled.
     pub pretty_powder: bool,
+    /// Whether the player may create the Cracker1000 mod elements
+    /// ([`crate::constants::is_mod_element`]). Existing particles always keep
+    /// simulating; this only hides them from the menus and refuses new ones.
+    ///
+    /// A global preference, so it stays out of the save layout: bincode is not
+    /// self-describing and adding a serialized field would make every existing
+    /// `.tptrs` file undecodable.
+    #[serde(skip, default = "mod_elements_default")]
+    pub mod_elements_enabled: bool,
     /// Border behaviour for particles.
     pub edge_mode: EdgeMode,
     /// Gravity direction.
@@ -265,6 +274,13 @@ pub struct SimulationConfig {
     pub heat_display_auto_h: i32,
 }
 
+/// Serde default for [`SimulationConfig::mod_elements_enabled`] when a payload
+/// predates the field: the port ships the mod elements enabled.
+#[inline]
+fn mod_elements_default() -> bool {
+    true
+}
+
 impl SimulationConfig {
     /// Creates a configuration for the given canvas size.
     ///
@@ -278,6 +294,9 @@ impl SimulationConfig {
             paused: false,
             aheat_enable: false,
             pretty_powder: false,
+            // The port ships the mod elements, so they are available until the
+            // user turns them off.
+            mod_elements_enabled: true,
             edge_mode: EdgeMode::Void,
             gravity_mode: GravityMode::Vertical,
             air_mode: AirMode::On,

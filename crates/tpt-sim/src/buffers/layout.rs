@@ -144,6 +144,8 @@ impl SimBuffers {
             gpu_block_air: grid.block_air,
             block_airh: vec![0; num_cells],
             gpu_block_airh: grid.block_airh,
+            gpu_elem_block_air: grid.elem_block_air,
+            gpu_elem_block_airh: grid.elem_block_airh,
 
             // Rendering: fire glow per cell, packed framebuffer per pixel.
             fire_r: vec![0; num_cells],
@@ -172,6 +174,8 @@ impl SimBuffers {
             grav_tool_mass: vec![0.0; num_cells],
             gpu_grav_tool_mass: grid.grav_tool_mass,
             grav_tool_mass_dirty: false,
+            gpu_grav_mass_override: grid.grav_mass_override,
+            gpu_grav_mass_override_set: grid.grav_mass_override_set,
             grav_mask: vec![u32::MAX; num_cells],
             gpu_grav_mask: grid.grav_mask,
             grav_fx: vec![0.0; num_cells],
@@ -203,6 +207,9 @@ impl SimBuffers {
             gpu_photon_mask: grid.photon_mask,
             move_tables_stale: true,
             gpu_create_queue: grid.create_queue,
+            gpu_flood_queue: grid.flood_queue,
+            gpu_flood_counters: grid.flood_counters,
+            gpu_flood_marks: grid.flood_marks,
             gpu_portal_ty: grid.portal_ty,
             gpu_portal_data: grid.portal_data,
             gpu_wireless: grid.wireless,
@@ -457,6 +464,10 @@ impl SimBuffers {
         self.gpu_block_air = self.client.empty(num_cells * WORD);
         self.block_airh = vec![0; num_cells];
         self.gpu_block_airh = self.client.empty(num_cells * WORD);
+        // Element-driven air/heat blocks are device-only: allocate them zeroed
+        // so the first frame after a resize does not see a stale mask.
+        self.gpu_elem_block_air = alloc_zeroed(&self.client, num_cells);
+        self.gpu_elem_block_airh = alloc_zeroed(&self.client, num_cells);
 
         self.fire_r = vec![0; num_cells];
         self.gpu_fire_r = self.client.empty(num_cells * WORD);
@@ -479,6 +490,9 @@ impl SimBuffers {
         self.gpu_grav_mass_prev = self.client.empty(num_cells * WORD);
         self.grav_tool_mass = vec![0.0; num_cells];
         self.gpu_grav_tool_mass = self.client.empty(num_cells * WORD);
+        // One-shot element mass injections: device-only, so zero them here.
+        self.gpu_grav_mass_override = alloc_zeroed(&self.client, num_cells);
+        self.gpu_grav_mass_override_set = alloc_zeroed(&self.client, num_cells);
         self.grav_tool_mass_dirty = false;
         self.grav_mask = vec![u32::MAX; num_cells];
         self.gpu_grav_mask = self.client.empty(num_cells * WORD);
@@ -547,6 +561,10 @@ impl SimBuffers {
             &self.client,
             Self::GPU_CREATE_COUNT * Self::CREATE_WORDS + 1,
         );
+        let flood_pixels = self.config.num_pixels().max(1);
+        self.gpu_flood_queue = alloc_zeroed(&self.client, flood_pixels);
+        self.gpu_flood_counters = alloc_zeroed(&self.client, 2);
+        self.gpu_flood_marks = alloc_zeroed(&self.client, flood_pixels);
         self.gpu_portal_ty = alloc_zeroed(&self.client, PORTAL_CAPACITY);
         self.gpu_portal_data = alloc_zeroed(&self.client, PORTAL_CAPACITY * PORTAL_WORDS);
         self.gpu_wireless = alloc_zeroed(&self.client, PORTAL_CHANNELS * 2);
@@ -774,6 +792,8 @@ struct GridHandles {
     wall_emap: Handle,
     block_air: Handle,
     block_airh: Handle,
+    elem_block_air: Handle,
+    elem_block_airh: Handle,
     fire_r: Handle,
     fire_g: Handle,
     fire_b: Handle,
@@ -784,6 +804,8 @@ struct GridHandles {
     grav_mass: Handle,
     grav_mass_prev: Handle,
     grav_tool_mass: Handle,
+    grav_mass_override: Handle,
+    grav_mass_override_set: Handle,
     grav_mask: Handle,
     grav_fx: Handle,
     grav_fy: Handle,
@@ -801,6 +823,9 @@ struct GridHandles {
     elem_phys: Handle,
     photon_mask: Handle,
     create_queue: Handle,
+    flood_queue: Handle,
+    flood_counters: Handle,
+    flood_marks: Handle,
     portal_ty: Handle,
     portal_data: Handle,
     wireless: Handle,
@@ -833,6 +858,8 @@ impl GridHandles {
             wall_emap: client.empty(cell_bytes),
             block_air: client.empty(cell_bytes),
             block_airh: client.empty(cell_bytes),
+            elem_block_air: alloc_zeroed(client, num_cells),
+            elem_block_airh: alloc_zeroed(client, num_cells),
             fire_r: client.empty(cell_bytes),
             fire_g: client.empty(cell_bytes),
             fire_b: client.empty(cell_bytes),
@@ -843,6 +870,8 @@ impl GridHandles {
             grav_mass: client.empty(cell_bytes),
             grav_mass_prev: client.empty(cell_bytes),
             grav_tool_mass: client.empty(cell_bytes),
+            grav_mass_override: alloc_zeroed(client, num_cells),
+            grav_mass_override_set: alloc_zeroed(client, num_cells),
             grav_mask: client.empty(cell_bytes),
             grav_fx: alloc_zeroed(client, num_cells),
             grav_fy: alloc_zeroed(client, num_cells),
@@ -863,6 +892,9 @@ impl GridHandles {
                 client,
                 SimBuffers::GPU_CREATE_COUNT * SimBuffers::CREATE_WORDS + 1,
             ),
+            flood_queue: alloc_zeroed(client, num_pixels),
+            flood_counters: alloc_zeroed(client, 2),
+            flood_marks: alloc_zeroed(client, num_pixels),
             portal_ty: alloc_zeroed(client, PORTAL_CAPACITY),
             portal_data: alloc_zeroed(client, PORTAL_CAPACITY * PORTAL_WORDS),
             wireless: alloc_zeroed(client, PORTAL_CHANNELS * 2),

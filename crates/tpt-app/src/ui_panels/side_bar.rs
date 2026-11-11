@@ -9,7 +9,7 @@ use tpt_core::elements::MenuCategory;
 use crate::app_state::{AppState, STAMPS_DIR, SelectedTool, format_save_time};
 use crate::i18n::{t, t_fmt};
 
-use super::shared::{ACCENT, TEXT_DIM, element_def, element_description, tool_label};
+use super::shared::{ACCENT, TEXT_DIM, element_def, element_description};
 
 /// TPT menu sections in `msections` order (`SimulationData.cpp:79-95`), plus
 /// the port-only rigid-body list appended at the end.
@@ -73,27 +73,6 @@ pub(super) fn draw_side_bar(ui: &mut Ui, state: &mut AppState) {
     }
 
     ui.separator();
-    ui.label(
-        RichText::new(t("side_bar.bound_tools"))
-            .small()
-            .strong()
-            .color(TEXT_DIM),
-    );
-    ui.label(
-        RichText::new(tool_label(state, state.primary_tool))
-            .small()
-            .color(TEXT_DIM),
-    );
-    ui.label(
-        RichText::new(tool_label(state, state.secondary_tool))
-            .small()
-            .color(TEXT_DIM),
-    );
-    ui.label(
-        RichText::new(t("side_bar.selected_element_hint"))
-            .small()
-            .color(TEXT_DIM),
-    );
 
     // `GameModel.cpp:1851-1852` puts `Element::Description` on the tool and
     // `GameView.cpp:1304-1331` renders it as the palette tooltip while the
@@ -108,7 +87,7 @@ pub(super) fn draw_side_bar(ui: &mut Ui, state: &mut AppState) {
         ui.add(
             egui::Label::new(
                 RichText::new(element_description(state, ty))
-                    .small()
+                    .size(14.0)
                     .color(TEXT_DIM),
             )
             .wrap(),

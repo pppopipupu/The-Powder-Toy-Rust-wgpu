@@ -14,6 +14,7 @@ use super::super::{
 };
 use super::TRON_HEAD;
 use super::elements_basic::*;
+use super::elements_modext::*;
 use super::elements_special::*;
 
 /// Element `Graphics` colour overrides, in TPT's element order.
@@ -31,6 +32,10 @@ use super::elements_special::*;
 /// (`Element.cpp:230-249`): it never writes `colr/colg/colb`, so a particle
 /// whose element has no colour rule keeps the table colour. It must stay last,
 /// so no element can inherit a stale or zero colour from a neighbour's rule.
+/// The mod's own elements reach it through [`modext_graphics_rgb`], which
+/// applies their `Graphics` colour mutations and otherwise returns `base`.
+/// `tmp3` is read by `ALUM` and `GRPH`; no colour rule in the batch reads
+/// `tmp4`.
 ///
 /// Elements in this batch with no `Graphics` override (`FRAY`, `RPEL`,
 /// `CRAY`, `RFRG`, `RFGL`, `RSST`, `RSSS`, `BREC`, `MERC`, `HEAC`, `ARAY`,
@@ -49,6 +54,8 @@ pub(crate) fn element_graphics_rgb(
     decoration_level: u32,
     tmp: i32,
     tmp2: i32,
+    tmp3: i32,
+    tmp4: i32,
     vx: f32,
     vy: f32,
     tick: u32,
@@ -211,7 +218,12 @@ pub(crate) fn element_graphics_rgb(
     } else if ty == PT_STKM || ty == PT_STKM2 || ty == PT_FIGH {
         (0.0f32, 0.0f32, 0.0f32)
     } else {
-        base
+        // The mod's elements (`PT_CHLR ..= PT_MGNT`) keep their `Graphics`
+        // transcriptions in `elements_modext.rs`; ids without a colour rule fall
+        // through to the table colour there.
+        modext_graphics_rgb(
+            base, ty, life, ctype, temp, pid, dcolour, tmp, tmp2, tmp3, tmp4, vx, vy, tick,
+        )
     }
 }
 /// Element `Graphics` colour override dispatch including loaded `PIPE` cargo.
@@ -265,6 +277,8 @@ pub(crate) fn graphics_rgb(
                 decoration_level,
                 tmp3,
                 0i32,
+                0i32,
+                0i32,
                 cargo_vx,
                 cargo_vy,
                 tick,
@@ -297,6 +311,8 @@ pub(crate) fn graphics_rgb(
             decoration_level,
             tmp,
             tmp2,
+            tmp3,
+            tmp4,
             vx,
             vy,
             tick,

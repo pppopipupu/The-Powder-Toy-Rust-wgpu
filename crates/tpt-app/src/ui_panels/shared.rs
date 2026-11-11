@@ -59,11 +59,17 @@ pub(super) const MENU_HIDDEN: [&str; 20] = [
     "DEFAULT_PT_RFGL",
 ];
 
-/// `false` for the elements TPT hides from the palette (`MenuVisible = 0`).
+/// `false` for the elements a user-facing element list must skip.
 ///
-/// Hidden elements stay placeable through `SimCommand`s and Lua; only the
-/// palette and the spawn-element dropdown skip them.
-pub(super) fn menu_visible(definition: &ElementDef) -> bool {
+/// `MenuVisible = 0` in the reference table hides an element from the palette
+/// and the spawn-element dropdown while `SimCommand`s and Lua can still create
+/// it. The Cracker1000 mod range is hidden while the player turned it off;
+/// that toggle also refuses new placements, so an off switch removes the
+/// elements everywhere.
+pub(super) fn menu_visible(definition: &ElementDef, config: &SimulationConfig) -> bool {
+    if tpt_core::constants::is_mod_element(definition.id) && !config.mod_elements_enabled {
+        return false;
+    }
     !MENU_HIDDEN.contains(&definition.identifier.as_str())
 }
 
@@ -366,17 +372,6 @@ pub(super) fn element_rgb(state: &AppState, ty: u32) -> u32 {
         .unwrap_or(0x0080_8080)
 }
 
-/// Display name of a wall id.
-pub(super) fn wall_name(state: &AppState, id: u8) -> &str {
-    state
-        .engine
-        .walls
-        .iter()
-        .find(|wall| wall.id == id)
-        .map(|wall| wall.name.as_str())
-        .unwrap_or(t("tools.tool_wall_fallback"))
-}
-
 /// Localized description of a wall id, matching [`element_description`].
 ///
 /// Wall descriptions come from `default_walls()` and are keyed by the
@@ -409,44 +404,6 @@ pub(super) fn rigid_id_at(state: &AppState, x: i32, y: i32) -> Option<u32> {
             .any(|pixel| pixel.grid_x == x && pixel.grid_y == y)
             .then_some(body.id)
     })
-}
-
-/// Human-readable label of a bound tool.
-pub(super) fn tool_label(state: &AppState, tool: SelectedTool) -> String {
-    match tool {
-        SelectedTool::Element(ty) => element_name(state, ty),
-        SelectedTool::Wall(id) => t_fmt("tools.tool_wall", &[wall_name(state, id)]),
-        SelectedTool::SimTool(kind) => sim_tool_label(kind).to_string(),
-        SelectedTool::RigidBody { shape, elem_ty } => {
-            format!(
-                "{} {}",
-                rigid_shape_label(shape),
-                element_name(state, elem_ty)
-            )
-        }
-        SelectedTool::Eraser => String::from("Eraser"),
-        SelectedTool::Property => String::from("PROP"),
-        SelectedTool::Sign { mode } => t_fmt("tools.tool_decoration", &[mode.label()]),
-        SelectedTool::SignTool => String::from("SIGN"),
-        SelectedTool::Sample => String::from("SMPL"),
-        SelectedTool::Particle => t_fmt(
-            "tools.tool_particle",
-            &[&element_name(state, state.prefs.spawn_element)],
-        ),
-        SelectedTool::Gol { rule } => t_fmt(
-            "tools.tool_gol",
-            &[&tpt_sim::gol_kernel::gol_rule_label(rule)],
-        ),
-    }
-}
-
-/// Human-readable name of a simulation tool (never localized).
-pub(super) fn sim_tool_label(kind: SimToolKind) -> &'static str {
-    SIM_TOOL_BUTTONS
-        .iter()
-        .find(|(candidate, ..)| *candidate == kind)
-        .map(|(_, label, ..)| *label)
-        .unwrap_or("Sim Tool")
 }
 
 /// Human-readable name of a rigid-body shape.
@@ -604,6 +561,7 @@ mod tests {
         use tpt_core::elements::ElementRegistry;
 
         let registry = ElementRegistry::new_default();
+        let config = SimulationConfig::new(64, 64);
         let mut names = Vec::with_capacity(MENU_HIDDEN.len());
         for identifier in MENU_HIDDEN {
             let definition = registry
@@ -611,7 +569,10 @@ mod tests {
                 .iter()
                 .find(|definition| definition.identifier == identifier)
                 .unwrap_or_else(|| panic!("{identifier} is not a registered element"));
-            assert!(!menu_visible(definition), "{identifier} must be hidden");
+            assert!(
+                !menu_visible(definition, &config),
+                "{identifier} must be hidden"
+            );
             names.push(definition.name.as_str());
         }
         // `MenuVisible = 0` in the reference element table, in `PT_*` order.
@@ -623,8 +584,50 @@ mod tests {
             ]
         );
         // Everything else stays visible.
-        assert!(menu_visible(registry.get(tpt_core::constants::PT_DUST)));
-        assert!(menu_visible(registry.get(tpt_core::constants::PT_WATR)));
+        assert!(menu_visible(registry.get(tpt_core::constants::PT_DUST), &config));
+        assert!(menu_visible(registry.get(tpt_core::constants::PT_WATR), &config));
+    }
+
+    /// The mod-element switch hides exactly the Cracker1000 appendix: every id
+    /// from `PT_FNTC` to `PT_MGNT` leaves the palette and the element search
+    /// while it is off, and the reference ids keep their normal visibility.
+    #[test]
+    fn mod_elements_follow_the_palette_toggle() {
+        use tpt_core::constants::{PT_FNTC, PT_MGNT, PT_SEED};
+        use tpt_core::elements::ElementRegistry;
+
+        let registry = ElementRegistry::new_default();
+        let mut disabled = SimulationConfig::new(64, 64);
+        disabled.mod_elements_enabled = false;
+        let enabled = SimulationConfig::new(64, 64);
+
+        let mut mod_count = 0u32;
+        for definition in &registry.elements {
+            let is_mod = (PT_FNTC..=PT_MGNT).contains(&definition.id);
+            if is_mod {
+                mod_count += 1;
+                assert!(
+                    menu_visible(definition, &enabled),
+                    "{} must be listed while the toggle is on",
+                    definition.name
+                );
+                assert!(
+                    !menu_visible(definition, &disabled),
+                    "{} must be hidden while the toggle is off",
+                    definition.name
+                );
+            } else {
+                assert_eq!(
+                    menu_visible(definition, &disabled),
+                    menu_visible(definition, &enabled),
+                    "{} must ignore the toggle",
+                    definition.name
+                );
+            }
+        }
+        assert_eq!(mod_count, PT_MGNT - PT_FNTC + 1);
+        // The last reference element stays available with the mod range off.
+        assert!(menu_visible(registry.get(PT_SEED), &disabled));
     }
 
     #[test]

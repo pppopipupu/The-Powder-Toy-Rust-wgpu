@@ -3,7 +3,7 @@
 use mlua::{Lua, MultiValue, Table, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
-use tpt_core::constants::{PT_NONE, PT_NUM};
+use tpt_core::constants::{PT_NONE, PT_NUM, is_mod_element};
 
 use crate::api::{
     pair, refresh_map_rect, refresh_particle_count, refresh_particles, value_to_f64, value_to_i64,
@@ -87,6 +87,12 @@ pub(crate) fn register_lifecycle(lua: &Lua, bridge: &Bridge, sim: &Table) -> mlu
                             return -1i64;
                         }
                         if ty == PT_NONE || ty as usize >= engine.registry.elements.len() {
+                            return -1i64;
+                        }
+                        // `sim.partCreate(newID, ...)` rewrites the slot and
+                        // allocates without `create_part`, so the mod switch
+                        // that guards the 3-argument form is enforced here too.
+                        if is_mod_element(ty) && !engine.bufs.config.mod_elements_enabled {
                             return -1i64;
                         }
 

@@ -304,9 +304,13 @@ fn candidates(state: &AppState) -> Vec<Candidate> {
     let mut list = Vec::new();
 
     // Hidden elements never get a tool (`GameModel::InitTools` skips
-    // `MenuVisible = 0`), so they are not searchable either.
+    // `MenuVisible = 0`), so they are not searchable either. The mod range
+    // follows the same rule while the player turned it off.
     for definition in &state.engine.registry.elements {
-        if definition.enabled && !definition.name.is_empty() && menu_visible(definition) {
+        if definition.enabled
+            && !definition.name.is_empty()
+            && menu_visible(definition, &state.engine.bufs.config)
+        {
             list.push(Candidate::Element(definition.id));
         }
     }

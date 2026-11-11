@@ -1,5 +1,4 @@
 {
-  "bound_tools": "BOUND TOOLS",
   "cat_electronics": "Electronics",
   "cat_explosives": "Explosives",
   "cat_force": "Force",
@@ -20,12 +19,11 @@
   "element_search_empty": "No matching element or tool",
   "element_search_placeholder": "Type a name, description or menu",
   "element_search_title": "Element Search",
-  "selected_element_hint": "SMPL / PART use the selected element",
   "stamps_delete": "Delete",
   "stamps_delete_confirm": "Delete permanently",
   "stamps_delete_prompt": "Delete stamp \"{0}\"?",
-  "stamps_empty": "No stamps yet — press Ctrl+S and drag to capture one.",
-  "stamps_help": "Ctrl+S captures a stamp · L places the newest",
+  "stamps_empty": "No stamps yet — capture one from the simulation view.",
+  "stamps_help": "Pick Place to use the selected stamp.",
   "stamps_in": "Stamps in ./{0}",
   "stamps_place": "Place",
   "stamps_title": "Stamps"

@@ -704,6 +704,16 @@ fn simulation_section(ui: &mut Ui, state: &mut AppState) -> bool {
         "",
         t("options.pretty_powder_info"),
     );
+    // Port-only switch: the Cracker1000 elements stay simulated in loaded
+    // saves, but with this off they vanish from every element menu and the
+    // creation paths refuse new ones.
+    changed |= option_checkbox(
+        ui,
+        &mut state.prefs.mod_elements_enabled,
+        t("options.mod_elements"),
+        "",
+        t("options.mod_elements_info"),
+    );
     changed
 }
 

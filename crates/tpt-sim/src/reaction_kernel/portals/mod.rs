@@ -1,4 +1,5 @@
-//! Portal (`PRTI` / `PRTO`) and wireless (`WIFI`) device-resident SoA passes.
+//! Portal (`PRTI` / `PRTO`), powered portal (`PPTI` / `PPTO`) and wireless
+//! (`WIFI`) device-resident SoA passes.
 //!
 //! Portals and wireless transmitters transfer particles and electrical sparks
 //! across the simulation grid via temperature-indexed channels.
@@ -21,6 +22,14 @@
 //!   - Global FIFO `portalp[CHANNELS][8][80]`: mapped to `gpu_portal_ty` and `gpu_portal_data`.
 //!   - Swirl animation: 4 orbital particles encoded in `life` (distances) and `ctype` (angles)
 //!     via `orbitalparts.h`.
+//! * `PPTI.cpp:74-176` / `PPTO.cpp:81-205`: the powered pair drives the same
+//!   `portalp` FIFO — there is one queue, not two — behind a `tmp2` power gate
+//!   (the 5x5 `tmp2 != 10` handshake, `== 10` to kick the neighbours). Their
+//!   kernels live in `reaction_kernel::modext::powered`, which launches them
+//!   before the creation drain so a release's `create_part(-1, ...)`
+//!   materialises in the same tick; this module owns the shared ring bodies
+//!   (`channels::portal_capture_ring` / `channels::spark_ring`) and the two
+//!   animation steps (`channels::portal_animate_in` / `portal_animate_out`).
 
 mod channels;
 mod wifi;

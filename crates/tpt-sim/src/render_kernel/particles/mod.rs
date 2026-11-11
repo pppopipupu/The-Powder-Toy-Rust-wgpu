@@ -18,6 +18,10 @@
 //! [`graphics_cola`] carries `cola` and `fire_rgba` the
 //! `firea/firer/fireg/fireb` quadruple.
 //!
+//! The mod's own elements (`PT_CHLR ..= PT_MGNT`) keep their `Graphics`
+//! transcription in `elements_modext.rs`, which the three dispatchers fall back
+//! to for those ids.
+//!
 //! # Deliberate deviations
 //!
 //! * `Renderer.cpp:829-848` `EFFECT_DBGLINES` (the PRTI/PRTO channel lines) is
@@ -39,12 +43,14 @@ use tpt_core::constants::*;
 
 pub(crate) mod colour;
 pub(crate) mod elements_basic;
+pub(crate) mod elements_modext;
 pub(crate) mod elements_special;
 pub(crate) mod kernels;
 pub(crate) mod pixel_mode;
 
 pub(crate) use colour::*;
 pub(crate) use elements_basic::*;
+pub(crate) use elements_modext::*;
 pub(crate) use elements_special::*;
 pub use kernels::*;
 pub(crate) use pixel_mode::*;

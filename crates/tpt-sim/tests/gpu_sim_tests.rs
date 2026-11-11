@@ -224,6 +224,8 @@ mod edits;
 mod elec_partial;
 #[path = "gpu_sim/electronics.rs"]
 mod electronics;
+#[path = "gpu_sim/flood_component.rs"]
+mod flood_component;
 #[path = "gpu_sim/gravity_fft.rs"]
 mod gravity_fft;
 #[path = "gpu_sim/movement.rs"]

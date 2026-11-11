@@ -118,9 +118,14 @@ fn stage_cold(word: u32) -> bool {
 /// a `receiver` at Manhattan distance `manhattan`?
 ///
 /// `sender_bits` / `receiver_bits` are the snapshot flag words of the spark and
-/// the receiver, which is where the `NTCT` / `PTCT` / `QRTZ` temperature gates
-/// read from. `receiver_pressurised` is the other half of the `QRTZ` gate: the
-/// air cell under the receiving pixel is above [`QRTZ_PRESSURE`].
+/// the receiver, which is where the `NTCT` / `FNTC` / `PTCT` / `QRTZ`
+/// temperature gates read from. `receiver_pressurised` is the other half of the
+/// `QRTZ` gate: the air cell under the receiving pixel is above
+/// [`QRTZ_PRESSURE`].
+///
+/// `FNTC` is the fast `NTCT` and shares its gates (`SPRK.cpp:306,313-317,
+/// 336-340`); `FPTC` has no sender or receiver case in the reference, so it
+/// only appears in the spark's own `ctype` rules below.
 ///
 /// `INST` and `QRTZ` are special receivers even though neither carries
 /// `PROP_CONDUCTS` (`SPRK.cpp:290`): `INST` accepts only a `PSCN` spark and
@@ -142,6 +147,7 @@ fn spark_conducts(
         ok = false;
     }
     // A switch does not feed the pure logic levels back into itself.
+    // `SPRK.cpp:306` lists `FNTC` next to `NTCT`/`PTCT` here.
     if ok
         && sender == PT_SWCH
         && (receiver == PT_PSCN
@@ -149,6 +155,7 @@ fn spark_conducts(
             || receiver == PT_WATR
             || receiver == PT_SLTW
             || receiver == PT_NTCT
+            || receiver == PT_FNTC
             || receiver == PT_PTCT
             || receiver == PT_INWR)
     {
@@ -173,6 +180,12 @@ fn spark_conducts(
             || receiver == PT_NSCN;
     } else if ok && sender == PT_NTCT {
         ok = receiver == PT_PSCN || (receiver == PT_NSCN && stage_hot(sender_bits));
+    } else if ok && sender == PT_FNTC {
+        // `SPRK.cpp:313-317`: `FNTC` is the fast `NTCT`, same output set.
+        // `PT_FPTC` is absent from the reference's sender switch (only the
+        // `ct` switch and the 473 K heating lists name it), so an `FPTC`
+        // spark keeps the unrestricted default.
+        ok = receiver == PT_PSCN || (receiver == PT_NSCN && stage_hot(sender_bits));
     } else if ok && sender == PT_PTCT {
         ok = receiver == PT_PSCN || (receiver == PT_NSCN && stage_cold(sender_bits));
     } else if ok && sender == PT_INWR {
@@ -189,6 +202,11 @@ fn spark_conducts(
             // `SPRK.cpp:345-348`: only a PSCN charges an INST wire.
             ok = sender == PT_PSCN;
         } else if receiver == PT_NTCT {
+            ok = sender == PT_NSCN || (sender == PT_PSCN && stage_hot(receiver_bits));
+        } else if receiver == PT_FNTC {
+            // `SPRK.cpp:336-340`: fast `FNTC` input set. As in the sender
+            // switch, `PT_FPTC` has no case in the reference and therefore
+            // accepts any sender.
             ok = sender == PT_NSCN || (sender == PT_PSCN && stage_hot(receiver_bits));
         } else if receiver == PT_PTCT {
             ok = sender == PT_NSCN || (sender == PT_PSCN && stage_cold(receiver_bits));
@@ -292,12 +310,21 @@ pub(crate) fn spark_conduction_kernel(
                     }
                 }
 
-                // `SPRK.cpp` lines 93-96 & `NTCT.cpp`: thermistor spark self-cooling above 295 K.
-                if self_ctype == PT_NTCT || self_ctype == PT_PTCT {
+                // `SPRK.cpp` lines 93-96 & `NTCT.cpp`: thermistor spark
+                // self-cooling above 295 K. `SPRK.cpp:94-99` routes `FPTC`
+                // and `FNTC` through `Element_NTCT_update` too, so the fast
+                // thermistors cool by 2.5 K while sparked, not by their own
+                // element update's 10 K.
+                if self_ctype == PT_NTCT
+                    || self_ctype == PT_PTCT
+                    || self_ctype == PT_FNTC
+                    || self_ctype == PT_FPTC
+                {
                     if part_temp[id] > 295.0f32 {
                         part_temp[id] -= 2.5f32;
                     }
-                    // `SPRK.cpp` lines 241-246: a METL spark heats adjacent NTCT/PTCT to 473 K.
+                    // `SPRK.cpp` lines 241-246: a METL spark heats an adjacent
+                    // sparked NTCT/PTCT/FNTC/FPTC to 473 K.
                     for n in 0u32..25u32 {
                         let dx = (n % 5u32) as i32 - 2i32;
                         let dy = (n / 5u32) as i32 - 2i32;
@@ -400,8 +427,14 @@ pub(crate) fn spark_conduction_kernel(
                 let cell = (((py as u32) / CELL) * xcells + ((px as u32) / CELL)) as usize;
                 let receiver_pressurised = air_pv[cell] > QRTZ_PRESSURE;
 
-                // `SPRK.cpp` lines 269-276: a METL spark heats adjacent idle NTCT, PTCT or INWR to 473 K.
-                if self_ty == PT_NTCT || self_ty == PT_PTCT || self_ty == PT_INWR {
+                // `SPRK.cpp` lines 269-276: a METL spark heats adjacent idle
+                // NTCT, PTCT, FNTC, FPTC or INWR to 473 K.
+                if self_ty == PT_NTCT
+                    || self_ty == PT_PTCT
+                    || self_ty == PT_FNTC
+                    || self_ty == PT_FPTC
+                    || self_ty == PT_INWR
+                {
                     for n in 0u32..25u32 {
                         let dx = (n % 5u32) as i32 - 2i32;
                         let dy = (n / 5u32) as i32 - 2i32;

@@ -327,7 +327,7 @@ fn draw_tool_grid(ui: &mut Ui, state: &mut AppState) {
                     if !definition.enabled || definition.category != category {
                         continue;
                     }
-                    if !menu_visible(definition) {
+                    if !menu_visible(definition, &state.engine.bufs.config) {
                         continue;
                     }
                     let selected = primary == SelectedTool::Element(definition.id)
@@ -460,7 +460,7 @@ fn draw_tool_settings(ui: &mut Ui, state: &mut AppState) {
             .selected_text(spawn_name)
             .show_ui(ui, |ui| {
                 for definition in &state.engine.registry.elements {
-                    if !definition.enabled || !menu_visible(definition) {
+                    if !definition.enabled || !menu_visible(definition, &state.engine.bufs.config) {
                         continue;
                     }
                     let selected = definition.id == state.prefs.spawn_element;

@@ -73,7 +73,7 @@ const C5_WL_MASK: u32 = 0xFFFF_FFC0;
 const PAIR_CLAIMED: u32 = 0xFFFF_FFFFu32;
 /// `PT_NUM` mirrored for kernel-side range checks.
 const PT_NUM_U32: u32 = PT_NUM as u32;
-const _: () = assert!(PT_NUM == 200);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 /// `tpt_core::elements::SPAWN_DEFAULT_WORDS` mirrored for the H2 row reset.
 const SPAWN_DEFAULT_WORDS: usize = tpt_core::elements::SPAWN_DEFAULT_WORDS;
 const SPAWN_DEFAULT_WORDS_U32: u32 = SPAWN_DEFAULT_WORDS as u32;

@@ -15,6 +15,7 @@ use super::super::{
     PMODE_FLAT, PMODE_GLOW, PMODE_LFLARE, PMODE_OPTIONS, PMODE_SPARK,
 };
 use super::elements_basic::glow_bright;
+use super::elements_modext::modext_pixel_mode;
 use super::elements_special::{exot_flicker, pipe_cargo};
 use super::{EFFECT_LINES, TRON_DEATH, TRON_HEAD};
 
@@ -74,6 +75,9 @@ pub(crate) fn render_mask(render_mode: u32) -> u32 {
 /// (`GpuElementProps::pixel_mode`). The fallback chain for disabled render modes
 /// and the `COLOUR_*` rewrites stay in [`effective_pixel_mode`], because TPT
 /// applies them in `render_parts` after the `Graphics` call.
+///
+/// The mod's own elements fall through to [`modext_pixel_mode`], which carries
+/// the `pixel_mode` half of their `Graphics` functions.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn element_pixel_mode(
@@ -84,6 +88,8 @@ pub(crate) fn element_pixel_mode(
     temp: f32,
     tmp: i32,
     tmp2: i32,
+    tmp3: i32,
+    tmp4: i32,
     vx: f32,
     vy: f32,
     pid: u32,
@@ -422,7 +428,11 @@ pub(crate) fn element_pixel_mode(
         mode = 0u32;
     }
 
-    mode
+    // The mod's own elements (`PT_CHLR ..= PT_MGNT`): their `Graphics`
+    // `pixel_mode` mutations live in `elements_modext.rs`.
+    modext_pixel_mode(
+        mode, ty, life, ctype, temp, tmp, tmp2, tmp3, tmp4, vx, vy, pid, tick,
+    )
 }
 
 /// Effective `PMODE_*`/`FIRE_*` flags of one particle.
@@ -455,12 +465,14 @@ pub(crate) fn effective_pixel_mode(
     // so the dynamic rules below run for the cargo type. `props_pipe_to_part`
     // (`PIPE.cpp:421-448`) maps the pipe fields onto TPT's temporary particle as
     // `life = pipe->tmp2`, `tmp = pipe->tmp3`, `ctype = pipe->tmp4` and
-    // `tmp2 = 0`, `flags = 0`.
+    // `tmp2 = tmp3 = tmp4 = 0`, `flags = 0`.
     let mut gfx_ty = ty;
     let mut gfx_life = life;
     let mut gfx_ctype = ctype;
     let mut gfx_tmp = tmp;
     let mut gfx_tmp2 = tmp2;
+    let mut gfx_tmp3 = tmp3;
+    let mut gfx_tmp4 = tmp4;
     let mut gfx_flags = flags;
     if ty == PT_PIPE || ty == PT_PPIP {
         let cargo = pipe_cargo(ctype);
@@ -470,12 +482,14 @@ pub(crate) fn effective_pixel_mode(
             gfx_tmp = tmp3;
             gfx_ctype = tmp4 as u32;
             gfx_tmp2 = 0i32;
+            gfx_tmp3 = 0i32;
+            gfx_tmp4 = 0i32;
             gfx_flags = 0u32;
         }
     }
     let mut mode = element_pixel_mode(
-        pixel_mode, gfx_ty, gfx_life, gfx_ctype, temp, gfx_tmp, gfx_tmp2, vx, vy, pid, tick,
-        gfx_flags,
+        pixel_mode, gfx_ty, gfx_life, gfx_ctype, temp, gfx_tmp, gfx_tmp2, gfx_tmp3, gfx_tmp4, vx,
+        vy, pid, tick, gfx_flags,
     );
 
     // Fallbacks: a disabled effect degrades to the next cheaper one.
@@ -530,6 +544,8 @@ pub fn host_element_pixel_mode(
     _temp: f32,
     _tmp: i32,
     _tmp2: i32,
+    _tmp3: i32,
+    _tmp4: i32,
     _pid: u32,
     _tick: u32,
     flags: u32,
@@ -555,13 +571,14 @@ mod tests {
     #[test]
     fn test_phot_mode_decision() {
         let base = PMODE_FLAT;
-        let mode_without = host_element_pixel_mode(base, PT_PHOT, 0, 0, 295.15, 0, 0, 1, 0, 0);
+        let mode_without =
+            host_element_pixel_mode(base, PT_PHOT, 0, 0, 295.15, 0, 0, 0, 0, 1, 0, 0);
         assert_eq!(mode_without & PMODE_FLAT, 0);
         assert_ne!(mode_without & (FIRE_ADD | PMODE_ADD), 0);
         assert_ne!(mode_without & NO_DECO, 0);
 
         let mode_with =
-            host_element_pixel_mode(base, PT_PHOT, 0, 0, 295.15, 0, 0, 1, 0, FLAG_PHOTDECO);
+            host_element_pixel_mode(base, PT_PHOT, 0, 0, 295.15, 0, 0, 0, 0, 1, 0, FLAG_PHOTDECO);
         assert_eq!(mode_with & PMODE_FLAT, 0);
         assert_ne!(mode_with & (FIRE_ADD | PMODE_ADD), 0);
         assert_eq!(mode_with & NO_DECO, 0);

@@ -108,3 +108,54 @@ fn test_live_count_matches_the_pool() {
         .count();
     assert_eq!(live, counted, "device reduction must match the host scan");
 }
+
+/// The mod-element switch refuses every user placement path that bypasses
+/// `create_part`: the brush, the single-particle tool and the flood fill.
+///
+/// The toggle lives on the live config, so the same brush stroke must create
+/// the element again once it is back on.
+#[test]
+fn test_mod_element_toggle_refuses_user_placement() {
+    let _guard = gpu_lock();
+    let mut engine = create_test_engine(64, 64);
+    engine.bufs.config.mod_elements_enabled = false;
+
+    engine.apply_command(SimCommand::PlaceParticles {
+        points: vec![(10, 10)],
+        elem_ty: PT_FNTC,
+        replace_mode: false,
+        dcolour: 0,
+    });
+    engine.apply_command(SimCommand::SpawnParticle {
+        x: 20,
+        y: 20,
+        elem_ty: PT_FNTC,
+        vx: 0.0,
+        vy: 0.0,
+    });
+    engine.apply_command(SimCommand::FloodFillParticles {
+        x: 40,
+        y: 40,
+        elem_ty: PT_FNTC,
+    });
+    engine.ensure_host_current();
+    assert_eq!(
+        count_type(&engine, PT_FNTC),
+        0,
+        "a disabled mod element must not enter the world"
+    );
+
+    engine.bufs.config.mod_elements_enabled = true;
+    engine.apply_command(SimCommand::PlaceParticles {
+        points: vec![(10, 10)],
+        elem_ty: PT_FNTC,
+        replace_mode: false,
+        dcolour: 0,
+    });
+    engine.ensure_host_current();
+    assert_eq!(
+        count_type(&engine, PT_FNTC),
+        1,
+        "the same stroke must place FNTC with the switch on"
+    );
+}

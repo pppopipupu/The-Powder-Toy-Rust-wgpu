@@ -13,7 +13,7 @@ A GPU-accelerated Rust port of *The Powder Toy*. Simulation passes and fancy ren
 ## Overview
 
 - **Device-resident GPU pipeline**: Eulerian air/ambient heat, thermal conduction, phase/pressure transitions, element reactions, lock-free particle movement, Game of Life (`LIFE`), FFT Newtonian gravity, water equalisation, and fancy display rendering run on a single shared `wgpu::Device`/`Queue`, blitted straight into an `egui` texture without per-frame CPU/GPU round-trips.
-- **Full TPT element and wall set**: Ports the 195-slot built-in element registry (`PT_NONE` plus 194 elements), 19 wall types, and portal/wireless/piston/stickman mechanics.
+- **Full TPT element and wall set**: Ports the reference element registry (195 slots: `PT_NONE` plus 194 elements) from [The Powder Toy upstream](https://github.com/The-Powder-Toy/The-Powder-Toy), the 44 elements (`FNTC` … `MGNT`) added by [Cracker1000's fork](https://github.com/cracker1000/The-Powder-Toy), 19 wall types, and portal/wireless/piston/stickman mechanics.
 - **Workspace crates**: `tpt-core` (shared constants, element/wall definitions, 3D voxel model), `tpt-sim` (GPU buffers, CubeCL kernels, rigid bodies, 3D voxel engine), `tpt-save` (`.tptrs` / `.tpt3` serialization, undo history), and `tpt-app` (desktop window, UI, preferences, smoke/bench runners).
 
 ## Changes from Upstream The Powder Toy

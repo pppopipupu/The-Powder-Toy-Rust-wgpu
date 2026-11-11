@@ -45,7 +45,7 @@ const C_PT_LIGH: u32 = 107;
 const C_PT_STKM2: u32 = 137;
 const C_PT_SPAWN2: u32 = 126;
 const C_PT_FIGH: u32 = 159;
-const C_PT_NUM: u32 = 200;
+const C_PT_NUM: u32 = PT_NUM as u32;
 
 const C_STKM_MAX_FIGHTERS: usize = 100;
 const C_STKM_PLAYER1: usize = 100;

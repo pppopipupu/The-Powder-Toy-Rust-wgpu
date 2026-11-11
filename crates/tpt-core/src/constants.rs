@@ -52,12 +52,12 @@ pub const AIR_PLOSS: f32 = 0.9999;
 
 /// Total number of element slots (built-in plus custom elements).
 ///
-/// Derived from [`BUILTIN_ELEMENT_COUNT`], rounded up to a whole number of
-/// eight-slot groups so Lua-defined elements always have room, and kept at or
-/// below 200 because every element row costs 128 bytes on the GPU. Every id
+/// Derived from [`BUILTIN_ELEMENT_COUNT`], with room for sixteen Lua-defined
+/// elements, rounded up to a whole number of eight-slot groups, and kept at or
+/// below 256 because every element row costs 128 bytes on the GPU. Every id
 /// must also fit the 9-bit type field of a packed `pmap` word (`pmap_pack`),
 /// i.e. `PT_NUM <= 512`.
-pub const PT_NUM: usize = (BUILTIN_ELEMENT_COUNT + 7) & !7;
+pub const PT_NUM: usize = (BUILTIN_ELEMENT_COUNT + 16 + 7) & !7;
 
 /// Empty pixel.
 pub const PT_NONE: u32 = 0;
@@ -465,16 +465,123 @@ pub const PT_BASE: u32 = 193;
 /// SEED (TPT 195, `SEED.cpp`).
 pub const PT_SEED: u32 = 194;
 
-/// Number of built-in element definitions (`PT_NONE ..= PT_SEED`).
+// Mod elements
+//
+// The Powder Toy mod appends these 44 elements after `SEED`, in the order its
+// `meson.build` lists them. They are appended (never interleaved) so every
+// existing id stays pinned for saves and tests.
+
+/// FNTC (mod id 195, `FNTC.cpp`).
+pub const PT_FNTC: u32 = 195;
+/// CLNT (mod id 196, `CLNT.cpp`).
+pub const PT_CLNT: u32 = 196;
+/// LED (mod id 197, `LED.cpp`).
+pub const PT_LED: u32 = 197;
+/// TIMC (mod id 198, `TIMC.cpp`).
+pub const PT_TIMC: u32 = 198;
+/// FUEL (mod id 199, `FUEL.cpp`).
+pub const PT_FUEL: u32 = 199;
+/// FPTC (mod id 200, `FPTC.cpp`).
+pub const PT_FPTC: u32 = 200;
+/// DMRN (mod id 201, `DMRN.cpp`).
+pub const PT_DMRN: u32 = 201;
+/// PINV (mod id 202, `PINV.cpp`).
+pub const PT_PINV: u32 = 202;
+/// WALL (mod id 203, `WALL.cpp`).
+pub const PT_WALL: u32 = 203;
+/// CHLR (mod id 204, `CHLR.cpp`).
+pub const PT_CHLR: u32 = 204;
+/// ACTY (mod id 205, `ACTY.cpp`).
+pub const PT_ACTY: u32 = 205;
+/// COND (mod id 206, `COND.cpp`).
+pub const PT_COND: u32 = 206;
+/// QGPP (mod id 207, `QGPP.cpp`).
+pub const PT_QGPP: u32 = 207;
+/// TMPS (mod id 208, `TMPS.cpp`).
+pub const PT_TMPS: u32 = 208;
+/// PHOS (mod id 209, `PHOS.cpp`).
+pub const PT_PHOS: u32 = 209;
+/// CMNT (mod id 210, `CMNT.cpp`).
+pub const PT_CMNT: u32 = 210;
+/// NTRG (mod id 211, `NTRG.cpp`).
+pub const PT_NTRG: u32 = 211;
+/// PRMT (mod id 212, `PRMT.cpp`).
+pub const PT_PRMT: u32 = 212;
+/// CSNS (mod id 213, `CSNS.cpp`).
+pub const PT_CSNS: u32 = 213;
+/// CWIR (mod id 214, `CWIR.cpp`).
+pub const PT_CWIR: u32 = 214;
+/// CLRC (mod id 215, `CLRC.cpp`).
+pub const PT_CLRC: u32 = 215;
+/// ELEX (mod id 216, `ELEX.cpp`).
+pub const PT_ELEX: u32 = 216;
+/// RADN (mod id 217, `RADN.cpp`).
+pub const PT_RADN: u32 = 217;
+/// GRPH (mod id 218, `GRPH.cpp`).
+pub const PT_GRPH: u32 = 218;
+/// RUBR (mod id 219, `RUBR.cpp`).
+pub const PT_RUBR: u32 = 219;
+/// DFOM (mod id 220, `DFOM.cpp`).
+pub const PT_DFOM: u32 = 220;
+/// ECLR (mod id 221, `ECLR.cpp`).
+pub const PT_ECLR: u32 = 221;
+/// CEXP (mod id 222, `CEXP.cpp`).
+pub const PT_CEXP: u32 = 222;
+/// CLUD (mod id 223, `CLUD.cpp`).
+pub const PT_CLUD: u32 = 223;
+/// COPR (mod id 224, `COPR.cpp`).
+pub const PT_COPR: u32 = 224;
+/// UVRD (mod id 225, `UVRD.cpp`).
+pub const PT_UVRD: u32 = 225;
+/// SUN (mod id 226, `SUN.cpp`).
+pub const PT_SUN: u32 = 226;
+/// PROJ (mod id 227, `PROJ.cpp`).
+pub const PT_PROJ: u32 = 227;
+/// GSNS (mod id 228, `GSNS.cpp`).
+pub const PT_GSNS: u32 = 228;
+/// BFLM (mod id 229, `BFLM.cpp`).
+pub const PT_BFLM: u32 = 229;
+/// AMBE (mod id 230, `AMBE.cpp`).
+pub const PT_AMBE: u32 = 230;
+/// NAPM (mod id 231, `NAPM.cpp`).
+pub const PT_NAPM: u32 = 231;
+/// ALUM (mod id 232, `ALUM.cpp`).
+pub const PT_ALUM: u32 = 232;
+/// ALMP (mod id 233, `ALMP.cpp`).
+pub const PT_ALMP: u32 = 233;
+/// PPTI (mod id 234, `PPTI.cpp`).
+pub const PT_PPTI: u32 = 234;
+/// PPTO (mod id 235, `PPTO.cpp`).
+pub const PT_PPTO: u32 = 235;
+/// PCON (mod id 236, `PCON.cpp`).
+pub const PT_PCON: u32 = 236;
+/// MISL (mod id 237, `MISL.cpp`).
+pub const PT_MISL: u32 = 237;
+/// MGNT (mod id 238, `MGNT.cpp`).
+pub const PT_MGNT: u32 = 238;
+
+/// Whether `ty` is one of the 44 elements the Cracker1000 mod appends to the
+/// reference element table (`PT_FNTC ..= PT_MGNT`).
+///
+/// The port defines them unconditionally so saves made with the mod keep
+/// loading; `SimulationConfig::mod_elements_enabled` only decides whether the
+/// player may create new ones.
+#[inline]
+pub fn is_mod_element(ty: u32) -> bool {
+    (PT_FNTC..=PT_MGNT).contains(&ty)
+}
+
+/// Number of built-in element definitions (`PT_NONE ..= PT_MGNT`).
 ///
 /// Derived from the last element id so appending a definition only needs its
 /// `PT_*` constant (and a table row).
-pub const BUILTIN_ELEMENT_COUNT: usize = PT_SEED as usize + 1;
+pub const BUILTIN_ELEMENT_COUNT: usize = PT_MGNT as usize + 1;
 
 // Built-in element IDs must fit inside the 9-bit type field of a packed pmap.
 const _: () = assert!(BUILTIN_ELEMENT_COUNT <= PT_NUM);
-// The GPU upload keeps one 128-byte row per slot; cap the table at 200.
-const _: () = assert!(PT_NUM <= 200);
+// The GPU upload keeps one 128-byte row per slot; cap the table at 256
+// (`PT_NUM * 128 == 32 768` bytes).
+const _: () = assert!(PT_NUM <= 256);
 // `pmap_pack` stores the element type in 9 bits, so no slot may exceed 511.
 const _: () = assert!(PT_NUM <= 512);
 
@@ -701,4 +808,20 @@ pub const fn pmap_type(pmap_val: u32) -> u32 {
 pub const fn pmap_id(pmap_val: u32) -> Option<u32> {
     let raw = pmap_val >> 9;
     if raw == 0 { None } else { Some(raw - 1) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mod_element_range_matches_the_cracker_appendix() {
+        // The reference table ends at `SEED`; the mod appends 44 ids after it.
+        assert!(!is_mod_element(PT_SEED));
+        assert!(is_mod_element(PT_FNTC));
+        assert!(is_mod_element(PT_MGNT));
+        assert!(!is_mod_element(PT_MGNT + 1));
+        assert_eq!(PT_MGNT - PT_FNTC + 1, 44);
+        assert_eq!(PT_MGNT as usize + 1, BUILTIN_ELEMENT_COUNT);
+    }
 }

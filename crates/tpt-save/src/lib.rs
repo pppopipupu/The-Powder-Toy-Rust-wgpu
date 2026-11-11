@@ -273,6 +273,9 @@ impl SaveData {
         config.edge_pressure = self.config.edge_pressure;
         config.display_mode = self.config.display_mode;
         config.colour_mode = self.config.colour_mode;
+        // The mod-element switch is a global preference (`prefs.json`), not
+        // save state, so a load or an undo must not silently re-enable it.
+        config.mod_elements_enabled = engine.bufs.config.mod_elements_enabled;
 
         if engine.bufs.config.xres != config.xres || engine.bufs.config.yres != config.yres {
             engine.resize_canvas(config.xres, config.yres);

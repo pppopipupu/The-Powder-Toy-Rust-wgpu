@@ -4,8 +4,10 @@
 //! ([`crate::reaction_kernel::life`], `combustion`, `fluid`, `corrosion`,
 //! `energy`, `electronics`, `wall`): the packed `GpuElementProps` word offsets,
 //! the wall-id mirrors with their compile-time assertions, the device-side
-//! hash/PRNG helpers, the insulation test, the spawn-request bits and the
-//! host-side spawn materialisation.
+//! hash/PRNG helpers, the insulation test, the spawn-request bits, the
+//! creation-queue records ([`request_create`] for a fresh slot,
+//! [`request_replace`] for re-creating an existing one) and the host-side spawn
+//! materialisation.
 //!
 //! The `#[cube]` helpers are re-exported from the parent module, so
 //! `reaction_kernel::elem_word` & friends keep their original paths.
@@ -89,8 +91,22 @@ pub(super) const FLAG_SPAWN_STOR: u32 = 0x0000_1000;
 // and the particles are live for the movement and render passes of the same
 // frame, exactly as TPT's would be.
 //
-/// Word index of a record's allocated slot (`0` = still pending,
-/// `0xFFFF_FFFF` = dropped: no slot, pixel taken or out of bounds).
+// The queue carries two creation shapes. A [`request_create`] record asks the
+// drain for a *fresh* slot out of that window. A [`request_replace`] record
+// re-creates the particle that already owns a slot and mirrors
+// `Simulation::create_part(p, x, y, t)` with `p >= 0`
+// (`Simulation.cpp:1918-1945`): the record arrives with [`CR_DST`] already set
+// to `slot + 1`, the drain re-initialises that slot from the target element's
+// `DefaultProperties`, runs the target's `Create` hook, and rewrites the map
+// word at `(x, y)` in the layer of the new element. The old element's
+// `ChangeType` hook is NOT run: the mod elements that replace themselves this
+// way have no `ChangeType` on their old types, so TPT's notification would be a
+// no-op. The drain applies no occupancy test to the requested pixel: the caller
+// owns the slot and names the pixel it is taking over.
+//
+/// Word index of a record's slot: `0` = still pending, `0xFFFF_FFFF` = dropped
+/// (no slot, pixel taken or out of bounds), otherwise `slot + 1`. A
+/// [`request_replace`] record arrives with this word already filled in.
 pub(crate) const CR_DST: u32 = 0;
 /// Word index of the element id.
 pub(crate) const CR_TY: u32 = 1;
@@ -98,7 +114,8 @@ pub(crate) const CR_TY: u32 = 1;
 pub(crate) const CR_X: u32 = 2;
 /// See [`CR_X`].
 pub(crate) const CR_Y: u32 = 3;
-/// Word index of the "the record carries this field" bitmask.
+/// Word index of the record's mask: the `CR_SET_*` field overrides plus
+/// [`CR_NO_OCCUPANCY`] and [`CR_REPLACE`].
 pub(crate) const CR_MASK: u32 = 4;
 /// Word indices of the optional field overrides.
 pub(crate) const CR_LIFE: u32 = 5;
@@ -116,7 +133,8 @@ pub(crate) const CR_TMP3: u32 = 10;
 pub(crate) const CR_TMP4: u32 = 11;
 /// See [`CR_LIFE`].
 pub(crate) const CR_DCOLOUR: u32 = 12;
-/// Word index of the `part_flags` bits to OR onto the new particle.
+/// Word index of the `part_flags` word the new particle gets. The drain stores
+/// it, so a replace record drops the old slot's flags instead of OR-ing them.
 pub(crate) const CR_FLAGS: u32 = 13;
 /// Word indices of the optional velocity (`f32` bits).
 pub(crate) const CR_VX: u32 = 14;
@@ -150,6 +168,32 @@ pub(crate) const CR_SET_VY: u32 = 0x200;
 /// creates a whole burst of protons in one pixel. The default drain refuses a
 /// taken pixel, so a burst has to opt out explicitly.
 pub(super) const CR_NO_OCCUPANCY: u32 = 0x400;
+/// Reuse the slot named by [`CR_DST`] instead of allocating one.
+///
+/// Mirrors `Simulation::create_part(p, x, y, t)` with `p >= 0`
+/// (`Simulation.cpp:1918-1945`): the record arrives with `CR_DST = slot + 1`
+/// and the drain skips both the free-slot allocation and the occupancy test,
+/// handing the slot to the target element's `DefaultProperties` row and
+/// `Create` hook. The old element's `ChangeType` hook is not run (see the
+/// module comment).
+pub(crate) const CR_REPLACE: u32 = 0x800;
+// The replace bit shares the mask word with the field overrides; it must not
+// alias one, or the drain would take an override for a slot reuse.
+const _: () = assert!(
+    (CR_REPLACE
+        & (CR_SET_LIFE
+            | CR_SET_CTYPE
+            | CR_SET_TEMP
+            | CR_SET_TMP
+            | CR_SET_TMP2
+            | CR_SET_TMP3
+            | CR_SET_TMP4
+            | CR_SET_DCOLOUR
+            | CR_SET_VX
+            | CR_SET_VY
+            | CR_NO_OCCUPANCY))
+        == 0
+);
 
 /// `SimBuffers::GPU_CREATE_COUNT` mirrored for kernel bodies (rule 1).
 const _: () = assert!(SimBuffers::GPU_CREATE_COUNT == 16384);
@@ -167,6 +211,55 @@ const SPAWN_DEFAULT_WORDS_U32: u32 = 8;
 /// Sentinels stored in [`CR_DST`].
 const CREATE_PENDING_U32: u32 = 0;
 const CREATE_FAILED_U32: u32 = 0xFFFF_FFFF;
+
+/// Write one record into queue slot `rec`, when the queue has room for it.
+///
+/// `dst` is [`CREATE_PENDING_U32`] for a fresh-slot [`request_create`] and
+/// `slot + 1` for a [`request_replace`], whose destination is allocated before
+/// the drain runs. Both shapes share the [`CR_DST`]..[`CR_VY`] layout, so the
+/// writer is shared too and the two cannot drift apart.
+#[cube]
+#[allow(clippy::too_many_arguments)]
+fn write_create_record(
+    create_queue: &mut [Atomic<u32>],
+    rec: u32,
+    dst: u32,
+    ty: u32,
+    x: i32,
+    y: i32,
+    mask: u32,
+    life: i32,
+    ctype: u32,
+    temp: f32,
+    tmp: i32,
+    tmp2: i32,
+    tmp3: i32,
+    tmp4: i32,
+    dcolour: u32,
+    flags: u32,
+    vx: f32,
+    vy: f32,
+) {
+    if rec < GPU_CREATE_COUNT_U32 {
+        let base = (1u32 + rec * CREATE_WORDS_U32) as usize;
+        create_queue[base + CR_DST as usize].store(dst);
+        create_queue[base + CR_TY as usize].store(ty);
+        create_queue[base + CR_X as usize].store(x as u32);
+        create_queue[base + CR_Y as usize].store(y as u32);
+        create_queue[base + CR_MASK as usize].store(mask);
+        create_queue[base + CR_LIFE as usize].store(life as u32);
+        create_queue[base + CR_CTYPE as usize].store(ctype);
+        create_queue[base + CR_TEMP as usize].store(u32::reinterpret(temp));
+        create_queue[base + CR_TMP as usize].store(tmp as u32);
+        create_queue[base + CR_TMP2 as usize].store(tmp2 as u32);
+        create_queue[base + CR_TMP3 as usize].store(tmp3 as u32);
+        create_queue[base + CR_TMP4 as usize].store(tmp4 as u32);
+        create_queue[base + CR_DCOLOUR as usize].store(dcolour);
+        create_queue[base + CR_FLAGS as usize].store(flags);
+        create_queue[base + CR_VX as usize].store(u32::reinterpret(vx));
+        create_queue[base + CR_VY as usize].store(u32::reinterpret(vy));
+    }
+}
 
 /// Ask the drain for one particle with TPT's `create_part` semantics.
 ///
@@ -197,25 +290,81 @@ pub(crate) fn request_create(
     vy: f32,
 ) {
     let rec = create_queue[0].fetch_add(1u32);
-    if rec < GPU_CREATE_COUNT_U32 {
-        let base = (1u32 + rec * CREATE_WORDS_U32) as usize;
-        create_queue[base + CR_DST as usize].store(CREATE_PENDING_U32);
-        create_queue[base + CR_TY as usize].store(ty);
-        create_queue[base + CR_X as usize].store(x as u32);
-        create_queue[base + CR_Y as usize].store(y as u32);
-        create_queue[base + CR_MASK as usize].store(mask);
-        create_queue[base + CR_LIFE as usize].store(life as u32);
-        create_queue[base + CR_CTYPE as usize].store(ctype);
-        create_queue[base + CR_TEMP as usize].store(u32::reinterpret(temp));
-        create_queue[base + CR_TMP as usize].store(tmp as u32);
-        create_queue[base + CR_TMP2 as usize].store(tmp2 as u32);
-        create_queue[base + CR_TMP3 as usize].store(tmp3 as u32);
-        create_queue[base + CR_TMP4 as usize].store(tmp4 as u32);
-        create_queue[base + CR_DCOLOUR as usize].store(dcolour);
-        create_queue[base + CR_FLAGS as usize].store(flags);
-        create_queue[base + CR_VX as usize].store(u32::reinterpret(vx));
-        create_queue[base + CR_VY as usize].store(u32::reinterpret(vy));
-    }
+    write_create_record(
+        create_queue,
+        rec,
+        CREATE_PENDING_U32,
+        ty,
+        x,
+        y,
+        mask,
+        life,
+        ctype,
+        temp,
+        tmp,
+        tmp2,
+        tmp3,
+        tmp4,
+        dcolour,
+        flags,
+        vx,
+        vy,
+    );
+}
+
+/// Ask the drain to re-create the particle already living in `slot`.
+///
+/// This is TPT's `Simulation::create_part(p, x, y, t)` with `p >= 0`
+/// (`Simulation.cpp:1918-1945`): the slot is not reallocated, it starts over
+/// from the target element's `DefaultProperties` plus the [`CR_MASK`]
+/// overrides, and the target's `Create` hook runs — exactly like
+/// [`request_create`]. The drain rewrites the map word at `(x, y)` in the
+/// layer of the new element without testing occupancy, so the caller is
+/// responsible for naming a pixel the old particle frees or takes over.
+///
+/// The old element's `ChangeType` hook is not run (see the module comment).
+#[cube]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn request_replace(
+    create_queue: &mut [Atomic<u32>],
+    slot: u32,
+    ty: u32,
+    x: i32,
+    y: i32,
+    mask: u32,
+    life: i32,
+    ctype: u32,
+    temp: f32,
+    tmp: i32,
+    tmp2: i32,
+    tmp3: i32,
+    tmp4: i32,
+    dcolour: u32,
+    flags: u32,
+    vx: f32,
+    vy: f32,
+) {
+    let rec = create_queue[0].fetch_add(1u32);
+    write_create_record(
+        create_queue,
+        rec,
+        slot + 1u32,
+        ty,
+        x,
+        y,
+        mask | CR_REPLACE,
+        life,
+        ctype,
+        temp,
+        tmp,
+        tmp2,
+        tmp3,
+        tmp4,
+        dcolour,
+        flags,
+        vx,
+        vy,
+    );
 }
 
 /// [`request_create`] for the common case: an element at a pixel, no overrides.
@@ -243,7 +392,7 @@ pub(crate) fn request_create_plain(create_queue: &mut [Atomic<u32>], ty: u32, x:
 
 /// `Simulation::create_part` bounds/type guards mirrored for kernel bodies.
 const PT_NONE_U32: u32 = 0;
-const PT_NUM_U32: u32 = 200;
+const PT_NUM_U32: u32 = PT_NUM as u32;
 const PT_PLSM_U32: u32 = 28;
 const PT_TRON_U32: u32 = 151;
 const PT_HFLM_U32: u32 = 100;
@@ -259,6 +408,31 @@ const PT_WARP_U32: u32 = 112;
 const PT_SING_U32: u32 = 140;
 const PT_CLST_U32: u32 = 157;
 const PT_PTNM_U32: u32 = 187;
+/// Second-set element ids the `Create` hooks below test (`PT_FNTC`..`PT_MGNT`).
+const PT_CLNT_U32: u32 = 196;
+const PT_LED_U32: u32 = 197;
+const PT_PRMT_U32: u32 = 212;
+const PT_CWIR_U32: u32 = 214;
+const PT_GRPH_U32: u32 = 218;
+const PT_DFOM_U32: u32 = 220;
+const PT_CEXP_U32: u32 = 222;
+const PT_UVRD_U32: u32 = 225;
+const PT_BFLM_U32: u32 = 229;
+const PT_ALMP_U32: u32 = 233;
+const PT_MISL_U32: u32 = 237;
+const _: () = assert!(
+    PT_CLNT == 196
+        && PT_LED == 197
+        && PT_PRMT == 212
+        && PT_CWIR == 214
+        && PT_GRPH == 218
+        && PT_DFOM == 220
+        && PT_CEXP == 222
+        && PT_UVRD == 225
+        && PT_BFLM == 229
+        && PT_ALMP == 233
+        && PT_MISL == 237
+);
 /// `PT_SEED`; the create hook seeds its genome (`SEED.cpp:254-275`).
 const PT_SEED_U32: u32 = 194;
 /// `PLNT_DIR` (`PLNT.h`): bit offset of the growth direction inside `ctype`.
@@ -275,7 +449,7 @@ const PT_TUNG_U32: u32 = 171;
 const CELL_U32: u32 = 4;
 const TYPE_ENERGY_U32: u32 = 0x0000_0010;
 const _: () = assert!(PT_NONE == 0);
-const _: () = assert!(PT_NUM == 200);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 const _: () = assert!(PT_PLSM == 28);
 const _: () = assert!(PT_TRON == 151);
 const _: () = assert!(PT_HFLM == 100);
@@ -302,6 +476,9 @@ const _: () = assert!(CELL == 4);
 const _: () = assert!(TYPE_ENERGY == 0x0000_0010);
 /// `pmap_pack` stride: the id field is 23 bits, the type field 9.
 const _: () = assert!(pmap_pack(0, 0) == 1u32 << 9);
+/// The alloc kernel rebuilds a replace record's map word as
+/// `(slot + 1) << 9 | ty`; keep that shift in step with `pmap_pack`.
+const _: () = assert!(pmap_pack(41, 0) == 42u32 << 9);
 
 /// Seed a `u32` device local from a runtime anchor.
 ///
@@ -311,7 +488,7 @@ const _: () = assert!(pmap_pack(0, 0) == 1u32 << 9);
 /// on the device and keeps the local a device variable.
 #[cube]
 #[allow(clippy::erasing_op)]
-fn seed_u32(anchor: u32, value: u32) -> u32 {
+pub(crate) fn seed_u32(anchor: u32, value: u32) -> u32 {
     anchor * 0u32 + value
 }
 
@@ -322,8 +499,13 @@ pub(super) fn seed_f32(anchor: f32, value: f32) -> f32 {
     anchor * 0.0f32 + value
 }
 
-/// Drain step 1: hand every pending record a slot from the device window and
-/// scatter it into the spatial map of the layer its element belongs to.
+/// Drain step 1: give every new record of this frame its slot and its
+/// spatial-map entry.
+///
+/// A [`request_create`] record takes a slot from the device window and is
+/// scattered into the layer of its element. A [`request_replace`] record
+/// arrives with its slot already set and re-scatters that same slot, which is
+/// `create_part(p >= 0, ...)` (`Simulation.cpp:1918-1945`).
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn create_alloc_kernel(
@@ -341,23 +523,56 @@ fn create_alloc_kernel(
     records: u32,
 ) {
     let rec = ABSOLUTE_POS as u32;
-    if rec < records {
+    // `reset_gpu_create_queue` clears the count word but not the records, so a
+    // record belongs to this frame iff its index is below the count. Testing
+    // "the destination is still pending" would also skip every replace record,
+    // which arrives already allocated.
+    if rec < records && rec < create_queue[0] {
         let base = (1u32 + rec * CREATE_WORDS_U32) as usize;
-        if create_queue[base] == CREATE_PENDING_U32 {
-            let ty = create_queue[base + CR_TY as usize];
-            let x = create_queue[base + CR_X as usize] as i32;
-            let y = create_queue[base + CR_Y as usize] as i32;
-            let mut dst = seed_u32(ty, CREATE_FAILED_U32);
-            let in_bounds = x >= 0i32 && y >= 0i32 && (x as u32) < xres && (y as u32) < yres;
-            if in_bounds && ty != PT_NONE_U32 && ty < PT_NUM_U32 {
-                let px = (y as u32 * xres + x as u32) as usize;
-                let energy = (elem_word(elem_props, ty, WORD_PROPERTIES) & TYPE_ENERGY_U32) != 0u32;
+        let ty = create_queue[base + CR_TY as usize];
+        let x = create_queue[base + CR_X as usize] as i32;
+        let y = create_queue[base + CR_Y as usize] as i32;
+        let mask = create_queue[base + CR_MASK as usize];
+        let mut dst = seed_u32(ty, CREATE_FAILED_U32);
+        let in_bounds = x >= 0i32 && y >= 0i32 && (x as u32) < xres && (y as u32) < yres;
+        if in_bounds && ty != PT_NONE_U32 && ty < PT_NUM_U32 {
+            let px = (y as u32 * xres + x as u32) as usize;
+            let energy = (elem_word(elem_props, ty, WORD_PROPERTIES) & TYPE_ENERGY_U32) != 0u32;
+            if (mask & CR_REPLACE) != 0u32 {
+                // Slot reuse. `request_replace` already stored `slot + 1`, so
+                // no allocation and no occupancy test: the caller owns the
+                // slot. Drop the pixel's entry in either layer while it still
+                // names this slot, then write the new element's word into the
+                // layer its `TYPE_ENERGY` bit selects.
+                let replace_dst = create_queue[base + CR_DST as usize];
+                if replace_dst != CREATE_PENDING_U32 && replace_dst != CREATE_FAILED_U32 {
+                    dst = replace_dst;
+                    let s = (replace_dst - 1u32) as usize;
+                    part_ty[s] = ty;
+                    part_x[s] = x as f32;
+                    part_y[s] = y as f32;
+                    part_flags[s] = create_queue[base + CR_FLAGS as usize];
+                    // The id field of a packed word is `slot + 1`.
+                    if (pmap[px] >> 9u32) == replace_dst {
+                        pmap[px] = 0u32;
+                    }
+                    if (photons[px] >> 9u32) == replace_dst {
+                        photons[px] = 0u32;
+                    }
+                    let packed = (replace_dst << 9u32) | ty;
+                    if energy {
+                        photons[px] = packed;
+                    } else {
+                        pmap[px] = packed;
+                    }
+                }
+            } else {
                 let mut taken = if energy {
                     photons[px] != 0u32
                 } else {
                     pmap[px] != 0u32
                 };
-                if (create_queue[base + CR_MASK as usize] & CR_NO_OCCUPANCY) != 0u32 {
+                if (mask & CR_NO_OCCUPANCY) != 0u32 {
                     taken = false;
                 }
                 if !taken {
@@ -378,19 +593,22 @@ fn create_alloc_kernel(
                     }
                 }
             }
-            create_queue[base] = dst;
         }
+        create_queue[base] = dst;
     }
 }
 
-/// Drain step 2: fill the fields of the records this frame allocated, taking
-/// the ones the record overrides and the element's `DefaultProperties` for
-/// the rest. Stale records left in the queue by earlier frames are skipped:
-/// only the first `create_queue[0]` records belong to this frame.
+/// Drain step 2: fill the fields of the records this frame created or
+/// re-created, taking the ones the record overrides and the element's
+/// `DefaultProperties` for the rest. Stale records left in the queue by earlier
+/// frames are skipped: only the first `create_queue[0]` records belong to this
+/// frame.
 ///
-/// This is what clears `tmp3`, `tmp4` and `dcolour`: a window slot is recycled
-/// from whatever the last frame left there, and TPT's `create_part` starts from
-/// a clean default row.
+/// Both creation shapes land here — a fresh allocation and a [`request_replace`]
+/// record, whose destination word already names its slot — and the reset is the
+/// same for both. This is what clears `tmp3`, `tmp4` and `dcolour` on a *reused*
+/// slot: it is recycled from whatever the old element left there, and TPT's
+/// `create_part` starts from a clean default row.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn create_fields_kernel(
@@ -420,6 +638,8 @@ fn create_fields_kernel(
     if rec < records && rec < GPU_CREATE_COUNT_U32 {
         let base = (1u32 + rec * CREATE_WORDS_U32) as usize;
         let dst = create_queue[base];
+        // A replace record arrives with its destination already set, so it
+        // passes this test and re-initialises the slot it names.
         if dst != CREATE_PENDING_U32 && dst != CREATE_FAILED_U32 {
             let s = (dst - 1u32) as usize;
             let ty = create_queue[base + CR_TY as usize];
@@ -445,11 +665,20 @@ fn create_fields_kernel(
                 let up = (down + 4u32) % 8u32;
                 part_ctype[s] = 0b1110_1100_0000u32 | ((up & 7u32) << PLNT_DIR_U32);
             }
+            if (mask & CR_SET_CTYPE) == 0u32 && ty == PT_CEXP_U32 {
+                // `CEXP.cpp:91-97`: the charge starts as plasma instead of a
+                // solid, whatever the data row says.
+                part_ctype[s] = PT_PLSM_U32;
+            }
             part_temp[s] = if (mask & CR_SET_TEMP) != 0u32 {
                 f32::reinterpret(create_queue[base + CR_TEMP as usize])
             } else {
                 f32::reinterpret(spawn_defaults[db])
             };
+            if (mask & CR_SET_TEMP) == 0u32 && ty == PT_CEXP_U32 {
+                // `CEXP.cpp:93`: the blast temperature the fuse waits for.
+                part_temp[s] = 9720.0f32;
+            }
             part_tmp[s] = if (mask & CR_SET_TMP) != 0u32 {
                 create_queue[base + CR_TMP as usize] as i32
             } else {
@@ -473,6 +702,9 @@ fn create_fields_kernel(
 
             part_dcolour[s] = if (mask & CR_SET_DCOLOUR) != 0u32 {
                 create_queue[base + CR_DCOLOUR as usize]
+            } else if ty == PT_LED_U32 {
+                // `LED.cpp:95-98`: a fresh LED is white.
+                0xFFFF_FFFFu32
             } else {
                 0u32
             };
@@ -512,6 +744,12 @@ fn create_fields_kernel(
                 let h = hash_u32(frame_seed ^ (dst << 13u32) ^ (ty << 1u32));
                 rvx = ((h & 0xFFu32) as f32 * (1.0f32 / 255.0f32) - 0.5f32) * 0.2f32;
                 rvy = (((h >> 8u32) & 0xFFu32) as f32 * (1.0f32 / 255.0f32) - 0.5f32) * 0.2f32;
+            } else if ty == PT_UVRD_U32 {
+                // `UVRD.cpp:129-135`: 2 px/frame along
+                // `rng.between(0, 359)` degrees.
+                let a = (roll % 360u32) as f32 * (core::f32::consts::PI / 180.0f32);
+                rvx = 2.0f32 * a.cos();
+                rvy = 2.0f32 * a.sin();
             }
             part_vx[s] = rvx;
             part_vy[s] = rvy;
@@ -547,6 +785,15 @@ fn create_fields_kernel(
                 } else if ty == PT_GRVT_U32 {
                     // `GRVT.cpp:44-50`.
                     part_life[s] = 250i32 + (roll % 200u32) as i32;
+                } else if ty == PT_CEXP_U32 {
+                    // `CEXP.cpp:96`: life is the blast pressure.
+                    part_life[s] = 256i32;
+                } else if ty == PT_BFLM_U32 {
+                    // `BFLM.cpp:103-106`: `life = rng.between(80, 120)`.
+                    part_life[s] = 80i32 + (roll % 41u32) as i32;
+                } else if ty == PT_UVRD_U32 {
+                    // `UVRD.cpp:132`: five frames of travel.
+                    part_life[s] = 5i32;
                 }
             }
             // The `tmp`-seeded hooks. A caller that overrides the field keeps its
@@ -573,6 +820,18 @@ fn create_fields_kernel(
                     // `SEED.cpp:267-275`: every genome bit is a coin flip, so a
                     // uniform 15-bit word has the same distribution.
                     part_tmp[s] = (roll & 0x7FFF_u32) as i32;
+                } else if ty == PT_CLNT_U32 {
+                    // `CLNT.cpp:86-89`: default cooling target, in Celsius.
+                    part_tmp[s] = 22i32;
+                } else if ty == PT_CEXP_U32 {
+                    // `CEXP.cpp:95`: fuse length.
+                    part_tmp[s] = 100i32;
+                } else if ty == PT_DFOM_U32 {
+                    // `DFOM.cpp:160-165`: the spawn pixel, `tmp = x`.
+                    part_tmp[s] = create_queue[base + CR_X as usize] as i32;
+                } else if ty == PT_MISL_U32 {
+                    // `MISL.cpp:148-152`: target x in 1..=610.
+                    part_tmp[s] = 1i32 + (roll % 610u32) as i32;
                 }
             }
             if (mask & CR_SET_TMP2) == 0u32 {
@@ -587,6 +846,24 @@ fn create_fields_kernel(
                 } else if ty == PT_PQRT_U32 || ty == PT_ROCK_U32 || ty == PT_QRTZ_U32 {
                     // `PQRT.cpp` / `ROCK.cpp` / `QRTZ.cpp:44-50`.
                     part_tmp2[s] = (roll % 11u32) as i32;
+                } else if ty == PT_CWIR_U32 {
+                    // `CWIR.cpp:93-96`: melting point, in Kelvin.
+                    part_tmp2[s] = 2000i32;
+                } else if ty == PT_GRPH_U32 {
+                    // `GRPH.cpp:169-173`: `tmp2 = rng.between(0, 5)`.
+                    part_tmp2[s] = (roll % 6u32) as i32;
+                } else if ty == PT_DFOM_U32 {
+                    // `DFOM.cpp:160-165`: the spawn pixel, `tmp2 = y`.
+                    part_tmp2[s] = create_queue[base + CR_Y as usize] as i32;
+                } else if ty == PT_MISL_U32 {
+                    // `MISL.cpp:148-152`: target y in 1..=380.
+                    part_tmp2[s] = 1i32 + (roll % 380u32) as i32;
+                } else if ty == PT_PRMT_U32 {
+                    // `PRMT.cpp:107-110`: `tmp2 = rng.between(0, 10)`.
+                    part_tmp2[s] = (roll % 11u32) as i32;
+                } else if ty == PT_ALMP_U32 {
+                    // `ALMP.cpp:158-161`: `tmp2 = rng.between(0, 6)`.
+                    part_tmp2[s] = (roll % 7u32) as i32;
                 }
             }
             if (mask & CR_SET_TMP3) == 0u32 {
@@ -605,6 +882,14 @@ fn create_fields_kernel(
                     let py = create_queue[base + CR_Y as usize];
                     let cell = ((py / CELL_U32) * xcells + (px / CELL_U32)) as usize;
                     part_tmp3[s] = (air_pv[cell] * 64.0f32) as i32;
+                }
+                // `GRPH.cpp:172`: the ignition countdown starts full.
+                if ty == PT_GRPH_U32 {
+                    part_tmp3[s] = 100i32;
+                }
+                // `DFOM.cpp:164`: the coalesce timer.
+                if ty == PT_DFOM_U32 {
+                    part_tmp3[s] = 40i32;
                 }
             }
         }
@@ -630,7 +915,9 @@ pub(crate) fn reset_gpu_create_queue(bufs: &SimBuffers) {
     }
 }
 
-/// Allocate and initialise every particle the reaction passes asked for.
+/// Allocate and initialise every particle the reaction passes asked for: a
+/// fresh slot for each [`request_create`] record, an in-place reset of the named
+/// slot for each [`request_replace`].
 ///
 /// Must run after [`refresh_gpu_free_slots`] (so the device window holds this
 /// frame's free slots) and before the passes that allocate from the window

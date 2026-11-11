@@ -9,6 +9,7 @@
 //! | [`seed_gravity_tool_mass_kernel`] | folds the painted tool wells into the grid the solve reads |
 //! | [`seed_gravity_mass_kernel`] | clears the per-cell accumulator before the element contributions |
 //! | [`build_gravity_mass_kernel`] | atomic-adds every gravity element's mass (`GRVT`, `NBHL`, `NWHL`, `GBMB`, `GPMP`) |
+//! | [`apply_grav_mass_override_kernel`] | replays the one-shot `gravIn.mass` assignments of `CEXP` / `GSNS` into the built grid |
 //! | [`apply_gravity_kernel`] | applies `Loss`, then `newton_grav * grav_fx/fy[cell]` to every eligible particle's velocity |
 //! | [`copy_gravity_mass_kernel`] | snapshots the accumulator for the next frame's dispatch |
 //! | [`graviton_update_kernel`] | `GRVT` `tmp` clamp and the `GRAV`-style speed/life rule |
@@ -25,6 +26,14 @@
 //! of `1/65536` mass; the padded-mass kernel of [`crate::gravity_gpu`] converts
 //! it back to `f32` inside the solve. The scale keeps every TPT contribution
 //! (0.1 .. 51.2, and `0.2 * tmp` for `GRVT`) well inside the `i32` range.
+//!
+//! `CEXP` and `GSNS` instead *assign* `gravIn.mass[cell]` from their `Update`
+//! (`CEXP.cpp:80`, `GSNS.cpp:104`), with `0` as a legitimate value. Those
+//! writes go through [`set_grav_mass_override`] into the
+//! [`SimBuffers::gpu_grav_mass_override`] channel plus its write-flag grid,
+//! which [`apply_grav_mass_override_kernel`] folds into the accumulator after
+//! the additive build. [`grav_mass_at`] is the matching read for kernels that
+//! consume the solved grid.
 //!
 //! # Frame position
 //!
@@ -55,6 +64,17 @@ const MASS_SCALE: f32 = 65_536.0;
 
 /// Inverse of [`MASS_SCALE`], used when reading the accumulator back.
 pub(crate) const MASS_SCALE_INV: f32 = 1.0 / MASS_SCALE;
+
+/// Largest magnitude [`set_grav_mass_override`] accepts, in TPT mass units.
+///
+/// Chosen so the fixed-point product still fits an `i32`:
+/// `32767 * 65536 < i32::MAX`. TPT's element masses are smaller by orders of
+/// magnitude (at most `51.2` for a black hole), so the clamp only guards a
+/// corrupt or hostile `tmp`.
+const MASS_OVERRIDE_MAX: f32 = 32_767.0;
+
+/// Lower bound of the [`set_grav_mass_override`] clamp.
+const MASS_OVERRIDE_MIN: f32 = -32_767.0;
 
 /// TPT's per-element `NewtonianGravity` is `1.0` for every element
 /// (`simulation/Element.cpp`) and no element overrides it.
@@ -96,6 +116,49 @@ fn clampi(v: i32, lo: i32, hi: i32) -> i32 {
         out = hi;
     }
     out
+}
+
+/// Stores a one-shot mass override into `gravIn.mass` for the next solve.
+///
+/// `mass` is in TPT mass units (float); the accumulator is `1/65536` fixed
+/// point. `override_set` carries the "written this tick" flag: TPT's element
+/// updates *assign* `gravIn.mass[cell]`, so a forced `0` has to override the
+/// particle contributions instead of being indistinguishable from "no write".
+///
+/// Callers (`CEXP.cpp:80`, `GSNS.cpp:104`) pass the coarse cell of the pixel
+/// they occupy (`usize`, the index type the element kernels already use);
+/// [`apply_grav_mass_override_kernel`] replays the assignment into the mass
+/// grid once per gravity pass.
+#[cube]
+pub(crate) fn set_grav_mass_override(
+    override_mass: &mut [i32],
+    override_set: &mut [u32],
+    cell: usize,
+    mass: f32,
+) {
+    // Same half-away-from-zero rounding as `seed_gravity_mass_kernel`.
+    let mut scaled = clampf(mass, MASS_OVERRIDE_MIN, MASS_OVERRIDE_MAX) * MASS_SCALE;
+    if scaled >= 0.0f32 {
+        scaled += 0.5f32;
+    } else {
+        scaled -= 0.5f32;
+    }
+    override_mass[cell] = i32::cast_from(scaled);
+    override_set[cell] = 1u32;
+}
+
+/// Reads the solved mass grid for a coarse cell, in TPT mass units.
+///
+/// `cell` is the flat `cy * xcells + cx` index, like
+/// [`set_grav_mass_override`]'s. `fetch_add(0)` returns the old value without
+/// changing it, which is the portable non-destructive atomic read (CubeCL's
+/// atomic min/max coverage is tier-dependent). `fetch_max(0)` must not be used
+/// as a "read": it would clamp the negative hole / `NWHL` masses the snapshot
+/// carries.
+#[cube]
+pub(crate) fn grav_mass_at(mass: &[Atomic<i32>], cell: usize) -> f32 {
+    let raw = mass[cell].fetch_add(0i32);
+    raw as f32 * MASS_SCALE_INV
 }
 
 /// Deterministic integer avalanche (the finaliser of `xxh3`).
@@ -294,6 +357,35 @@ fn build_gravity_mass_kernel(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Replays this tick's one-shot element mass overrides into the freshly built
+/// mass grid.
+///
+/// `CEXP` (`CEXP.cpp:80`) and `GSNS` (`GSNS.cpp:104`) assign
+/// `gravIn.mass[cell]` outright, so the forced value replaces whatever the
+/// other gravity elements accumulated in that cell rather than adding to it.
+/// [`set_grav_mass_override`] recorded the value and its write flag during the
+/// element pass; this kernel applies one tick of writes between
+/// [`build_gravity_mass_kernel`] and [`copy_gravity_mass_kernel`], so the
+/// injection joins the snapshot the next solve reads. Cell-parallel and
+/// non-atomic: the channel holds one value per cell (the last element write
+/// wins, like TPT's own assignments in the same cell), and the launch order
+/// keeps this clear of the build's atomic adds.
+#[cube(launch_unchecked)]
+#[allow(clippy::collapsible_if)]
+fn apply_grav_mass_override_kernel(
+    grav_mass: &mut [Atomic<i32>],
+    override_mass: &[i32],
+    override_set: &[u32],
+    cells: u32,
+) {
+    let idx = ABSOLUTE_POS;
+    if idx < cells as usize {
+        if override_set[idx] != 0u32 {
+            grav_mass[idx].store(override_mass[idx]);
         }
     }
 }
@@ -720,7 +812,8 @@ pub fn step_gravity_element_updates(bufs: &mut SimBuffers, frame_seed: u32) {
 /// 2. apply `Loss` + the force to the current particles
 ///    (`Simulation.cpp:2361-2384`), then
 /// 3. rebuild `gpu_grav_mass` from the live particles (the element `Update`s
-///    of the frame that just ran) and copy it into `gpu_grav_mass_prev`.
+///    of the frame that just ran), replay this tick's `CEXP`/`GSNS` mass
+///    overrides into it, then copy it into `gpu_grav_mass_prev`.
 ///
 /// The first frame's snapshot is zero, exactly like a freshly cleared
 /// `gravIn.mass`; a `GRVT`/`NBHL` created this frame therefore attracts from
@@ -891,6 +984,20 @@ pub fn step_gravity_gpu(
             ycells as u32,
         );
 
+        // The element passes' one-shot `gravIn.mass` assignments replace the
+        // contributions built above in their cell (`CEXP`, `GSNS`); the modext
+        // clear kernel wipes the channel at the start of the next tick, so
+        // exactly one tick of writes lands here.
+        apply_grav_mass_override_kernel::launch_unchecked(
+            &client,
+            CubeCount::Static(cell_cubes, 1, 1),
+            CubeDim::new_1d(cell_dim),
+            BufferArg::from_raw_parts(bufs.gpu_grav_mass.clone(), cells),
+            BufferArg::from_raw_parts(bufs.gpu_grav_mass_override.clone(), cells),
+            BufferArg::from_raw_parts(bufs.gpu_grav_mass_override_set.clone(), cells),
+            cells as u32,
+        );
+
         // 4. `prev = current`, the double-buffer swap.
         copy_gravity_mass_kernel::launch_unchecked(
             &client,
@@ -910,3 +1017,14 @@ pub fn step_gravity_gpu(
 
 /// The coarse grid and the mass kernel both use the shared [`CELL`] size.
 const _: () = assert!(CELL == 4);
+
+/// The [`set_grav_mass_override`] clamp keeps the fixed-point product inside an
+/// `i32`: the rounding adds at most half a unit before the cast truncates.
+const _: () = assert!(
+    (MASS_OVERRIDE_MAX as i64) * (MASS_SCALE as i64) <= i32::MAX as i64,
+    "the mass override clamp must fit the fixed-point accumulator"
+);
+const _: () = assert!(
+    (MASS_OVERRIDE_MIN as i64) * (MASS_SCALE as i64) >= i32::MIN as i64,
+    "the mass override clamp must fit the fixed-point accumulator"
+);

@@ -471,7 +471,9 @@ pub(crate) fn plot_line(
 /// TPT `Renderer.cpp:793-828`: the dots are an `EFFECT_GRAVIN`/`EFFECT_GRAVOUT`
 /// effect, so the render mask keeps them only under `RENDER_EFFE`
 /// (`ElementGraphics.h:32`); the target cell is read from `pmap` like TPT's
-/// `TYP(sim->pmap[y + nyo][x + nxo])`.
+/// `TYP(sim->pmap[y + nyo][x + nxo])`. `PRTI.cpp:159` / `PRTO.cpp:188` are the
+/// only elements that raise the effect bits, so the powered `PPTI`/`PPTO`
+/// pair draws no dots despite animating `life`/`ctype` the same way.
 #[cube(launch_unchecked)]
 #[allow(
     clippy::identity_op,
@@ -662,9 +664,12 @@ pub fn render_stickmen_and_orbitals_kernel(
         // `Renderer.cpp:829-847` `EFFECT_DBGLINES`: while the debug HUD is on
         // and the pointer rests on a portal, draw a line to every portal of the
         // matching channel. Only the particle that owns the hovered pixel
-        // draws, so an overlapping pair does not double the line.
+        // draws, so an overlapping pair does not double the line. `PPTI` /
+        // `PPTO` do not set the effect bit in TPT (`PPTI.cpp:178-199`), so they
+        // never draw it.
         if debug_lines != 0u32
             && persistent == 0u32
+            && (ty == R_PT_PRTI || ty == R_PT_PRTO)
             && x == hover_x
             && y == hover_y
             && pmap[(y as u32 * xres + x as u32) as usize]

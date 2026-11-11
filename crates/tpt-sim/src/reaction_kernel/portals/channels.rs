@@ -178,14 +178,18 @@ pub fn orbital_step_prto(life: i32, ctype: u32, seed: u32) -> (i32, u32) {
     (out_b1 as i32, out_b2)
 }
 
-/// Portal IN: absorbs matter, energy, or sparks into the channel queue.
-#[allow(
-    clippy::manual_clamp,
-    clippy::too_many_arguments,
-    clippy::approx_constant
-)]
-#[cube(launch_unchecked)]
-pub fn prti_kernel(
+/// Capture ring shared by `PRTI` (`PRTI.cpp:75-118`) and `PPTI`
+/// (`PPTI.cpp:68-135`): absorb matter, energy, or sparks into the channel
+/// queue.
+///
+/// Both elements run the identical eight-lane scan; the only difference is
+/// the device id they accept, so the body is one helper with `device_ty` as
+/// the parameter. The caller owns the prologue (`tmp` = channel) and the
+/// orbital animation, which are also identical in TPT but depend on the
+/// element's own slot.
+#[cube]
+#[allow(clippy::manual_clamp, clippy::too_many_arguments)]
+pub fn portal_capture_ring(
     pmap: &[u32],
     photons: &[u32],
     part_ty: &mut [u32],
@@ -203,30 +207,15 @@ pub fn prti_kernel(
     portal_ty: &mut [Atomic<u32>],
     portal_data: &mut [u32],
     elem_props: &[u32],
+    device_ty: u32,
     xres: u32,
     yres: u32,
     n_slots: u32,
-    frame_seed: u32,
-) {
-    let idx = ABSOLUTE_POS;
-    if idx >= (xres * yres) as usize {
-        terminate!();
-    }
-    let v = pmap[idx];
-    if v == 0u32 {
-        terminate!();
-    }
-    let ty = v & 0x1FFu32;
-    if ty != PT_PRTI_U32 {
-        terminate!();
-    }
-    let s = pmap_slot(v);
-    if part_ty[s] != PT_PRTI_U32 {
-        terminate!();
-    }
-    let px = (idx as u32 % xres) as i32;
-    let py = (idx as u32 / xres) as i32;
-    let ch = temp_channel(part_temp[s]);
+    s: usize,
+    px: i32,
+    py: i32,
+    ch: u32,
+) -> u32 {
     part_tmp[s] = ch as i32;
 
     let mut fe = 0u32;
@@ -269,9 +258,9 @@ pub fn prti_kernel(
                 && nt != PT_STKM_U32
                 && nt != PT_STKM2_U32
                 && nt != PT_FIGH_U32
-                && nt != PT_PRTI_U32
                 && nt != PT_PRTO_U32
                 && nt != PT_WIFI_U32
+                && nt != device_ty
             {
                 let ns = pmap_slot(r);
                 if part_ty[ns] == nt {
@@ -379,6 +368,20 @@ pub fn prti_kernel(
         }
     }
 
+    fe
+}
+
+/// Swirl animation shared by `PRTI` (`PRTI.cpp:123-148`) and `PPTI`
+/// (`PPTI.cpp:143-168`): while `fe` is set the four orbital dots step inward,
+/// otherwise `life`/`ctype` are cleared so the dots disappear.
+#[cube]
+pub fn portal_animate_in(
+    part_life: &mut [i32],
+    part_ctype: &mut [u32],
+    s: usize,
+    frame_seed: u32,
+    fe: u32,
+) {
     if fe != 0u32 {
         let seed = hash_u32(frame_seed ^ mix_index(s as u32, 0x9E37_79B9u32));
         let (new_life, new_ctype) = orbital_step_prti(part_life[s], part_ctype[s], seed);
@@ -387,6 +390,152 @@ pub fn prti_kernel(
     } else {
         part_life[s] = 0i32;
         part_ctype[s] = 0u32;
+    }
+}
+
+/// Swirl animation shared by `PRTO` (`PRTO.cpp:143-178`) and `PPTO`
+/// (`PPTO.cpp:198-227`): outward stepping while `fe` is set, cleared otherwise.
+#[cube]
+pub fn portal_animate_out(
+    part_life: &mut [i32],
+    part_ctype: &mut [u32],
+    s: usize,
+    frame_seed: u32,
+    fe: u32,
+) {
+    if fe != 0u32 {
+        let seed = hash_u32(frame_seed ^ mix_index(s as u32, 0x85EB_CA6Bu32));
+        let (new_life, new_ctype) = orbital_step_prto(part_life[s], part_ctype[s], seed);
+        part_life[s] = new_life;
+        part_ctype[s] = new_ctype;
+    } else {
+        part_life[s] = 0i32;
+        part_ctype[s] = 0u32;
+    }
+}
+
+/// Portal IN: absorbs matter, energy, or sparks into the channel queue.
+#[allow(
+    clippy::manual_clamp,
+    clippy::too_many_arguments,
+    clippy::approx_constant
+)]
+#[cube(launch_unchecked)]
+pub fn prti_kernel(
+    pmap: &[u32],
+    photons: &[u32],
+    part_ty: &mut [u32],
+    part_life: &mut [i32],
+    part_ctype: &mut [u32],
+    part_temp: &[f32],
+    part_tmp: &mut [i32],
+    part_tmp2: &mut [i32],
+    part_tmp3: &mut [i32],
+    part_tmp4: &mut [i32],
+    part_vx: &[f32],
+    part_vy: &[f32],
+    part_flags: &mut [u32],
+    part_dcolour: &[u32],
+    portal_ty: &mut [Atomic<u32>],
+    portal_data: &mut [u32],
+    elem_props: &[u32],
+    xres: u32,
+    yres: u32,
+    n_slots: u32,
+    frame_seed: u32,
+) {
+    let idx = ABSOLUTE_POS;
+    if idx >= (xres * yres) as usize {
+        terminate!();
+    }
+    let v = pmap[idx];
+    if v == 0u32 {
+        terminate!();
+    }
+    let ty = v & 0x1FFu32;
+    if ty != PT_PRTI_U32 {
+        terminate!();
+    }
+    let s = pmap_slot(v);
+    if part_ty[s] != PT_PRTI_U32 {
+        terminate!();
+    }
+    let px = (idx as u32 % xres) as i32;
+    let py = (idx as u32 / xres) as i32;
+    let ch = temp_channel(part_temp[s]);
+    let fe = portal_capture_ring(
+        pmap,
+        photons,
+        part_ty,
+        part_life,
+        part_ctype,
+        part_temp,
+        part_tmp,
+        part_tmp2,
+        part_tmp3,
+        part_tmp4,
+        part_vx,
+        part_vy,
+        part_flags,
+        part_dcolour,
+        portal_ty,
+        portal_data,
+        elem_props,
+        PT_PRTI_U32,
+        xres,
+        yres,
+        n_slots,
+        s,
+        px,
+        py,
+        ch,
+    );
+    portal_animate_in(part_life, part_ctype, s, frame_seed, fe);
+}
+
+/// Conductor ring sparked by a released `SPRK` queue entry.
+///
+/// `PRTO.cpp:98-115` and `PPTO.cpp:132-149` both call `create_part(-1, ...,
+/// PT_SPRK)` on the eight neighbours of the portal; `Simulation.cpp:1857-1868`
+/// turns that into a type change of an idle conductor (`INST` or
+/// `PROP_CONDUCTS`) with `ctype = <conductor>` and a fresh four-tick spark
+/// life, and refuses every other pixel. Expressed receiver-side, that is one
+/// test per neighbour.
+#[cube]
+#[allow(clippy::too_many_arguments)]
+pub fn spark_ring(
+    pmap: &[u32],
+    part_ty: &mut [u32],
+    part_life: &mut [i32],
+    part_ctype: &mut [u32],
+    elem_props: &[u32],
+    px: i32,
+    py: i32,
+    xres: u32,
+    yres: u32,
+) {
+    for sn in 0u32..9u32 {
+        let sdx = (sn % 3u32) as i32 - 1i32;
+        let sdy = (sn / 3u32) as i32 - 1i32;
+        if sdx != 0i32 || sdy != 0i32 {
+            let scx = px + sdx;
+            let scy = py + sdy;
+            let scv = pmap_at(pmap, xres, yres, scx, scy);
+            if scv != 0u32 {
+                let scty = scv & 0x1FFu32;
+                let cn = pmap_slot(scv);
+                if part_ty[cn] == scty
+                    && scty != PT_SPRK_U32
+                    && part_life[cn] == 0i32
+                    && ((elem_word(elem_props, scty, WORD_PROPERTIES) & PROP_CONDUCTS_U32) != 0u32
+                        || scty == PT_INST_U32)
+                {
+                    part_ctype[cn] = scty;
+                    part_ty[cn] = PT_SPRK_U32;
+                    part_life[cn] = 4i32;
+                }
+            }
+        }
     }
 }
 
@@ -470,31 +619,10 @@ pub fn prto_kernel(
                         if old != 0u32 && portal_ty[pidx].compare_exchange_weak(old, 0u32) == old {
                             let emit_ty = old & 0x1FFu32;
                             if emit_ty == PT_SPRK_U32 {
-                                for sn in 0u32..9u32 {
-                                    let sdx = (sn % 3u32) as i32 - 1i32;
-                                    let sdy = (sn / 3u32) as i32 - 1i32;
-                                    if sdx != 0i32 || sdy != 0i32 {
-                                        let scx = px + sdx;
-                                        let scy = py + sdy;
-                                        let scv = pmap_at(pmap, xres, yres, scx, scy);
-                                        if scv != 0u32 {
-                                            let scty = scv & 0x1FFu32;
-                                            let cn = pmap_slot(scv);
-                                            if part_ty[cn] == scty
-                                                && scty != PT_SPRK_U32
-                                                && part_life[cn] == 0i32
-                                                && ((elem_word(elem_props, scty, WORD_PROPERTIES)
-                                                    & PROP_CONDUCTS_U32)
-                                                    != 0u32
-                                                    || scty == PT_INST_U32)
-                                            {
-                                                part_ctype[cn] = scty;
-                                                part_ty[cn] = PT_SPRK_U32;
-                                                part_life[cn] = 4i32;
-                                            }
-                                        }
-                                    }
-                                }
+                                spark_ring(
+                                    pmap, part_ty, part_life, part_ctype, elem_props, px, py, xres,
+                                    yres,
+                                );
                                 emitted = true;
                             } else {
                                 let donated = old >> 9u32;
@@ -539,13 +667,5 @@ pub fn prto_kernel(
         }
     }
 
-    if fe != 0u32 {
-        let seed = hash_u32(frame_seed ^ mix_index(s as u32, 0x85EB_CA6Bu32));
-        let (new_life, new_ctype) = orbital_step_prto(part_life[s], part_ctype[s], seed);
-        part_life[s] = new_life;
-        part_ctype[s] = new_ctype;
-    } else {
-        part_life[s] = 0i32;
-        part_ctype[s] = 0u32;
-    }
+    portal_animate_out(part_life, part_ctype, s, frame_seed, fe);
 }

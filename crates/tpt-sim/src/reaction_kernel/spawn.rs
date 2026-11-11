@@ -51,7 +51,7 @@ const _: () = assert!(PT_PROT == 173);
 const _: () = assert!(PT_PHOT == 29);
 const _: () = assert!(PT_ELEC == 31);
 const _: () = assert!(PT_LIGH == 107);
-const PT_NUM_U32: u32 = 200;
+const PT_NUM_U32: u32 = PT_NUM as u32;
 const PT_LIFE_U32: u32 = 105;
 const PT_LAVA_U32: u32 = 6;
 /// `PIPE.cpp:283`: a `PPIP`'s border brick is created glowing.
@@ -60,7 +60,7 @@ const PT_PPIP_U32: u32 = 162;
 const PT_BRCK_U32: u32 = 37;
 const _: () = assert!(PT_LIFE == 105 && PT_LAVA == 6);
 const _: () = assert!(PT_PPIP == 162 && PT_BRCK == 37);
-const _: () = assert!(PT_NUM == 200);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 
 /// The `skip`-th free pixel of the ring around `(x, y)`.
 ///

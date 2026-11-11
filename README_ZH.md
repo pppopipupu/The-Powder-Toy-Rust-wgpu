@@ -13,7 +13,7 @@
 ## 项目简介
 
 - **全流程 GPU 驻留管线**：欧拉流体气压/风速与环境温度、热传导与相变/压变、元素反应、无锁并行粒子移动、康威生命游戏（`LIFE`）、FFT 牛顿引力、水面均压与特效渲染均在同一个共享 `wgpu::Device`/`Queue` 上运行，渲染结果直接 blit 至 `egui` 纹理，无逐帧 CPU/GPU 往返拷贝。
-- **完整元素与墙体体系**：移植原版 195 项内置元素表（`PT_NONE` 与 194 种内置元素）、19 种墙体以及传送门/无线电/活塞/火柴人机制。
+- **完整元素与墙体体系**：从 [The Powder Toy 上游](https://github.com/The-Powder-Toy/The-Powder-Toy) 移植原版 195 项内置元素表（`PT_NONE` 与 194 种内置元素），并移植 [Cracker1000 分支](https://github.com/cracker1000/The-Powder-Toy) 新增的 44 种元素（`FNTC` … `MGNT`），另有 19 种墙体以及传送门/无线电/活塞/火柴人机制。
 - **Workspace 模块划分**：`tpt-core`（共享常量、元素与墙体定义、3D 体素模型）、`tpt-sim`（GPU 缓冲、CubeCL 内核、刚体、3D 体素引擎）、`tpt-save`（`.tptrs` / `.tpt3` 存档与撤销历史）与 `tpt-app`（桌面窗口、UI、偏好设置与冒烟/基准测试入口）。
 
 ## 相比原版 The Powder Toy 的主要更改

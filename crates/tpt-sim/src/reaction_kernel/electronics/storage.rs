@@ -16,8 +16,8 @@ const PT_PSCN_U32: u32 = 50;
 const _: () = assert!(PT_PSCN == 50);
 const PT_NONE_U32: u32 = 0;
 const _: () = assert!(PT_NONE == 0);
-const PT_NUM_U32: u32 = 200;
-const _: () = assert!(PT_NUM == 200);
+const PT_NUM_U32: u32 = PT_NUM as u32;
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 
 /// `STOR.cpp`: release cooldown after a discharge.
 const STOR_RELEASE_LIFE: i32 = 10;

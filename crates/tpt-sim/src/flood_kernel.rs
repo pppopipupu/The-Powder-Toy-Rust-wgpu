@@ -17,12 +17,11 @@
 //!
 //! `Simulation::FloodParts` (`Editing.cpp:879-1040`) walks the empty region
 //! containing the clicked pixel with a scanline flood. Here the region is grown
-//! by `xres + yres` dispatches of `flood_spread_kernel`: every marked, empty
-//! pixel marks its four empty neighbours, so a pixel at Manhattan distance `d`
-//! is reached after `d` rounds. `xres + yres` rounds cover the largest
-//! Manhattan distance on the canvas, which is the bound this port accepts: a
-//! corridor that winds for longer is truncated (the reference has no distance
-//! cap, only the old port's pixel budget approximated one).
+//! by `flood_spread_kernel`: every marked, empty pixel marks its four empty
+//! neighbours, so a pixel at Manhattan distance `d` is reached after `d`
+//! rounds. The walk runs until a round marks nothing new (see
+//! [`spread_until_stable`]), which is the reference's own stop condition: a
+//! corridor that winds longer than `xres + yres` is still filled.
 //!
 //! The marked pixels are then turned into creation records with
 //! `reaction_kernel::shared::request_create` and materialised by the regular
@@ -68,8 +67,8 @@ use crate::reaction_kernel::shared::{elem_word, launch_grid, pmap_at, pmap_slot,
 /// `PT_NONE` marks a free slot; mirrored for the kernel bodies (rule 1).
 const C_PT_NONE: u32 = 0;
 const _: () = assert!(PT_NONE == 0);
-const C_PT_NUM: u32 = 200;
-const _: () = assert!(PT_NUM == 200);
+const C_PT_NUM: u32 = PT_NUM as u32;
+const _: () = assert!(C_PT_NUM as usize == PT_NUM);
 /// `PT_SPRK`: a spark is a reaction state, not a fillable element.
 const C_PT_SPRK: u32 = 12;
 const _: () = assert!(PT_SPRK == 12);
@@ -165,6 +164,59 @@ fn clamp_temperature(value: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Convergence of the one-shot floods
+// ---------------------------------------------------------------------------
+
+/// Spread rounds per convergence chunk; each chunk ends with one probe round.
+const SPREAD_CHUNK: u32 = 32;
+
+/// Safety cap on chunks. A 4-connected region needs at most one round per
+/// pixel, and the fixed point is normally reached in a handful of rounds, so
+/// this only bounds a buggy kernel; it is not a distance limit.
+const SPREAD_MAX_CHUNKS: u32 = 4096;
+
+/// Reads the progress counter written by a spread round.
+///
+/// A read error is reported as "still changing" so the caller's cap decides
+/// when to stop instead of accepting a possibly truncated flood.
+fn read_changed(bufs: &SimBuffers, changed: &Handle) -> u32 {
+    let Ok(readback) = bufs.client.read(vec![changed.clone()]) else {
+        return 1;
+    };
+    readback
+        .first()
+        .and_then(|bytes| bytes.as_chunks::<4>().0.first())
+        .map(|chunk| u32::from_le_bytes(*chunk))
+        .unwrap_or(1)
+}
+
+/// Runs `round` until a full round marks no new pixel.
+///
+/// The counter is cleared before a probe round so the chunk's earlier progress
+/// does not count: only the probe's own writes decide whether the walk has
+/// reached its fixed point. The flood is monotone in the marks, so a converged
+/// probe means the whole connected region is marked.
+fn spread_until_stable(bufs: &SimBuffers, changed: &Handle, mut round: impl FnMut()) {
+    for _ in 0..SPREAD_MAX_CHUNKS {
+        for _ in 0..SPREAD_CHUNK {
+            round();
+        }
+        unsafe {
+            clear_changed_kernel::launch_unchecked(
+                &bufs.client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(1),
+                BufferArg::from_raw_parts(changed.clone(), 1),
+            );
+        }
+        round();
+        if read_changed(bufs, changed) == 0 {
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Particle flood fill (`FloodParts`)
 // ---------------------------------------------------------------------------
 
@@ -174,6 +226,14 @@ fn clear_marks_kernel(marks: &mut [u32], pixels: u32) {
     let i = ABSOLUTE_POS;
     if i < pixels as usize {
         marks[i] = 0u32;
+    }
+}
+
+/// Reset the fixed-point progress counter before a probe round.
+#[cube(launch_unchecked)]
+fn clear_changed_kernel(changed: &mut [Atomic<u32>]) {
+    if ABSOLUTE_POS == 0usize {
+        changed[0].store(0u32);
     }
 }
 
@@ -199,8 +259,17 @@ fn flood_seed_kernel(pmap: &[u32], marks: &mut [u32], seed: u32, pixels: u32) {
 ///
 /// All writers store [`C_MARK`], so the read/write race between neighbouring
 /// threads only moves a pixel's discovery forward; it cannot corrupt the mark.
+/// Every newly marked pixel bumps `changed`, which is how the host knows the
+/// walk has reached its fixed point and can stop launching rounds.
 #[cube(launch_unchecked)]
-fn flood_spread_kernel(pmap: &[u32], marks: &mut [u32], pixels: u32, xres: u32, yres: u32) {
+fn flood_spread_kernel(
+    pmap: &[u32],
+    marks: &mut [u32],
+    changed: &mut [Atomic<u32>],
+    pixels: u32,
+    xres: u32,
+    yres: u32,
+) {
     let i = ABSOLUTE_POS;
     if i < pixels as usize {
         let mark = marks[i];
@@ -209,26 +278,30 @@ fn flood_spread_kernel(pmap: &[u32], marks: &mut [u32], pixels: u32, xres: u32, 
             let y = (i as u32) / xres;
             if x > 0u32 {
                 let n = i - 1usize;
-                if pmap[n] == 0u32 {
+                if pmap[n] == 0u32 && marks[n] == 0u32 {
                     marks[n] = mark;
+                    changed[0].fetch_add(1u32);
                 }
             }
             if x + 1u32 < xres {
                 let n = i + 1usize;
-                if pmap[n] == 0u32 {
+                if pmap[n] == 0u32 && marks[n] == 0u32 {
                     marks[n] = mark;
+                    changed[0].fetch_add(1u32);
                 }
             }
             if y > 0u32 {
                 let n = i - xres as usize;
-                if pmap[n] == 0u32 {
+                if pmap[n] == 0u32 && marks[n] == 0u32 {
                     marks[n] = mark;
+                    changed[0].fetch_add(1u32);
                 }
             }
             if y + 1u32 < yres {
                 let n = i + xres as usize;
-                if pmap[n] == 0u32 {
+                if pmap[n] == 0u32 && marks[n] == 0u32 {
                     marks[n] = mark;
+                    changed[0].fetch_add(1u32);
                 }
             }
         }
@@ -313,6 +386,9 @@ pub fn flood_fill_device(bufs: &mut SimBuffers, x: i32, y: i32, elem_ty: u32) {
     // Arm the creation queue for the records [`flood_create_kernel`] pushes
     // below: empty it and rebuild the device free-slot window.
     crate::reaction_kernel::begin_pending_creates(bufs);
+    let changed = bufs
+        .client
+        .create_from_slice(bytemuck::cast_slice(&[0u32]));
 
     unsafe {
         clear_marks_kernel::launch_unchecked(
@@ -331,19 +407,24 @@ pub fn flood_fill_device(bufs: &mut SimBuffers, x: i32, y: i32, elem_ty: u32) {
             seed,
             pixels as u32,
         );
-        // `xres + yres` is the largest Manhattan distance on the canvas.
-        for _ in 0..(xres + yres) {
-            flood_spread_kernel::launch_unchecked(
-                &bufs.client,
-                CubeCount::Static(cubes, 1, 1),
-                CubeDim::new_1d(dim),
-                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), bufs.pmap.len()),
-                BufferArg::from_raw_parts(marks.clone(), pixels),
-                pixels as u32,
-                xres,
-                yres,
-            );
-        }
+    }
+    // `FloodParts` has no distance cap; the walk's own fixed point is the only
+    // stop condition, so a corridor that winds longer than `xres + yres` is
+    // still filled completely.
+    spread_until_stable(bufs, &changed, || unsafe {
+        flood_spread_kernel::launch_unchecked(
+            &bufs.client,
+            CubeCount::Static(cubes, 1, 1),
+            CubeDim::new_1d(dim),
+            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), bufs.pmap.len()),
+            BufferArg::from_raw_parts(marks.clone(), pixels),
+            BufferArg::from_raw_parts(changed.clone(), 1),
+            pixels as u32,
+            xres,
+            yres,
+        );
+    });
+    unsafe {
         flood_create_kernel::launch_unchecked(
             &bufs.client,
             CubeCount::Static(cubes, 1, 1),
@@ -603,6 +684,7 @@ fn property_spread_kernel(
     part_ty: &[u32],
     marks: &mut [u32],
     params: &[u32],
+    changed: &mut [Atomic<u32>],
     pixels: u32,
     xres: u32,
     yres: u32,
@@ -635,7 +717,11 @@ fn property_spread_kernel(
                         && (nx as u32) < xres
                         && (ny as u32) < yres
                     {
-                        marks[(ny as u32 * xres + nx as u32) as usize] = C_MARK;
+                        let mi = (ny as u32 * xres + nx as u32) as usize;
+                        if marks[mi] == 0u32 {
+                            marks[mi] = C_MARK;
+                            changed[0].fetch_add(1u32);
+                        }
                     }
                 }
                 k += 1u32;
@@ -1130,8 +1216,11 @@ pub fn flood_property(
             y,
             slots as u32,
         );
-        // Same Manhattan-diameter bound as the empty-region fill.
-        for _ in 0..(xres + yres) {
+        // `flood_prop` has no distance cap: run the walk to its fixed point.
+        let changed = bufs
+            .client
+            .create_from_slice(bytemuck::cast_slice(&[0u32]));
+        spread_until_stable(bufs, &changed, || {
             property_spread_kernel::launch_unchecked(
                 &bufs.client,
                 CubeCount::Static(cubes, 1, 1),
@@ -1141,12 +1230,13 @@ pub fn flood_property(
                 BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), bufs.capacity),
                 BufferArg::from_raw_parts(marks.clone(), pixels),
                 BufferArg::from_raw_parts(params.clone(), P_WORDS),
+                BufferArg::from_raw_parts(changed.clone(), 1),
                 pixels as u32,
                 xres,
                 yres,
                 slots as u32,
             );
-        }
+        });
 
         let write_count = pixels as u32;
         match field {

@@ -91,7 +91,7 @@ const CLST_KICK_HOT: f32 = 0.01;
 const CLST_KICK_VERY_HOT: f32 = 0.005;
 /// `PT_NUM` as a `u32` for the kernel body: `CLNE.cpp:66-69` rejects latched
 /// ids at or past the end of the element table.
-const PT_NUM_K: u32 = 200;
+const PT_NUM_K: u32 = PT_NUM as u32;
 const _: () = assert!(PT_NUM_K as usize == PT_NUM);
 
 // RNG stream salts: every reaction draws its rolls from its own stream, so two

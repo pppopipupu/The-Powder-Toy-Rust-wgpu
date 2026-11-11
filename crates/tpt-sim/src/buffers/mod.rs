@@ -215,6 +215,19 @@ pub struct SimBuffers {
     /// `1` where the wall blocks heat conduction.
     pub block_airh: Vec<u32>,
     pub gpu_block_airh: Handle,
+    /// Element-driven `bmap_blockair` writes (`WALL` / `RUBR` / `ALUM`), one
+    /// `u32` per air cell.
+    ///
+    /// Device-only scratch: the element passes stamp it on the device, the next
+    /// frame's air mask rebuild folds it into the wall mask, and a canvas
+    /// resize recreates it zeroed. There is no host shadow because no host pass
+    /// ever needs the value.
+    pub gpu_elem_block_air: Handle,
+    /// Element-driven `bmap_blockairh` writes, one `u32` per air cell.
+    ///
+    /// Device-only, exactly like [`Self::gpu_elem_block_air`]: the element
+    /// passes write it and the heat-conduction mask rebuild consumes it.
+    pub gpu_elem_block_airh: Handle,
 
     pub fire_r: Vec<u32>,
     pub gpu_fire_r: Handle,
@@ -291,6 +304,29 @@ pub struct SimBuffers {
     pub gpu_grav_tool_mass: Handle,
     /// `true` while [`Self::grav_tool_mass`] holds writes not yet uploaded.
     pub grav_tool_mass_dirty: bool,
+    /// One-shot mass the element passes inject into the next gravity solve,
+    /// one `i32` per air cell in units of `1/65536` mass.
+    ///
+    /// This is the shared channel for every element whose `Update` assigns
+    /// `gravIn.mass[cell]`: `CEXP` (`CEXP.cpp:80`) and `GSNS`
+    /// (`GSNS.cpp:104`). Writers go through
+    /// [`crate::gravity_kernel::set_grav_mass_override`] during the element
+    /// pass; [`crate::gravity_kernel::step_gravity_gpu`] folds exactly one
+    /// tick of writes into the accumulator it snapshots (after the element
+    /// build, before the copy the next solve reads), and the modext clear
+    /// kernel zeroes the grid on the device at the start of the next element
+    /// pass. The injection therefore lasts one tick and there is no host
+    /// shadow; every canvas resize recreates it zeroed.
+    pub gpu_grav_mass_override: Handle,
+    /// `1` in each cell [`Self::gpu_grav_mass_override`] holds a write for.
+    ///
+    /// TPT's elements *assign* `gravIn.mass[cell]`, and a forced `0` is a
+    /// meaningful value (`CEXP` with `tmp == 0`, a `GSNS` reading zero), so the
+    /// value grid needs a companion flag to tell "written zero" from "not
+    /// written this tick". [`Self::gpu_grav_mass_override`] and this grid are
+    /// written together by the element passes and zeroed together by the
+    /// modext clear kernel; one `u32` per air cell, device-only.
+    pub gpu_grav_mass_override_set: Handle,
     /// Gravity propagation mask per air cell (`gravIn.mask`, `0` = blocked).
     pub grav_mask: Vec<u32>,
     pub gpu_grav_mask: Handle,
@@ -379,6 +415,17 @@ pub struct SimBuffers {
     /// `GPU_CREATE_COUNT * CREATE_WORDS + 1` `u32` words (see
     /// `reaction_kernel::shared::request_create`).
     pub gpu_create_queue: Handle,
+    /// Work list of the per-tick connected-component floods
+    /// (`reaction_kernel::flood_component`), one pixel index per word. Each
+    /// pixel is pushed at most once per flood, so `pixels` words are enough.
+    pub gpu_flood_queue: Handle,
+    /// `[head, tail]` atomic counters of [`Self::gpu_flood_queue`]; the drain
+    /// resets both when it finishes, so the next seed scan starts from zero.
+    pub gpu_flood_counters: Handle,
+    /// Per-pixel visited marks of the flood drain, `pixels` words. The drain
+    /// clears a pixel's mark when it pops it, which leaves the buffer zero for
+    /// the next flood.
+    pub gpu_flood_marks: Handle,
     /// Portal slot header word (`((donated_slot + 1) << 9) | ty`), `PORTAL_CAPACITY` entries.
     pub gpu_portal_ty: Handle,
     /// Portal payload words (`PORTAL_CAPACITY * PORTAL_WORDS` entries:

@@ -43,10 +43,12 @@
 //!
 //! Finally [`air_block_masks_kernel`] rebuilds `bmap_blockair` /
 //! `bmap_blockairh` from the wall maps, exactly like the per-frame wall loop at
-//! the end of `Simulation::BeforeSim` (`Simulation.cpp:3765-3775`). It runs
-//! *after* the heat pass so the previous frame's `blockairh` counter increments
-//! (written by the thermal pass) are visible to `update_airh`, and resets them
-//! for the next frame.
+//! the end of `Simulation::BeforeSim` (`Simulation.cpp:3765-3775`), and ORs in
+//! the element-driven stamps (`WALL` / `RUBR` / `ALUM`) the previous
+//! tick's modext pass left in `gpu_elem_block_air` / `gpu_elem_block_airh`. It
+//! runs *after* the heat pass so the previous frame's `blockairh` counter
+//! increments (written by the thermal pass) are visible to `update_airh`, and
+//! resets them for the next frame.
 //!
 //! [`hot_air_pressure_kernel`] closes the step: TPT applies `HotAir` inside the
 //! per-particle loop after the ambient-air passes and before `TransitionPhase`
@@ -254,6 +256,8 @@ pub fn step_air_gpu(bufs: &mut SimBuffers) {
             BufferArg::from_raw_parts(bufs.gpu_wall_emap.clone(), num_cells),
             BufferArg::from_raw_parts(bufs.gpu_block_air.clone(), num_cells),
             BufferArg::from_raw_parts(bufs.gpu_block_airh.clone(), num_cells),
+            BufferArg::from_raw_parts(bufs.gpu_elem_block_air.clone(), num_cells),
+            BufferArg::from_raw_parts(bufs.gpu_elem_block_airh.clone(), num_cells),
             num_cells as u32,
         );
     }

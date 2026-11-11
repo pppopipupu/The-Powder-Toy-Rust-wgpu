@@ -23,18 +23,8 @@ fn bomb_blast_immune(ty: u32) -> bool {
     ty == PT_DMND || ty == PT_CLNE || ty == PT_PCLN || ty == PT_BCLN || ty == PT_VIBR
 }
 
-/// Rounds of the connected-`BANG` flood per frame.
-///
-/// One round carries the arming mark a single 4-connected hop, so the constant
-/// is the reach per frame; the mark is monotone and persists on armed pixels,
-/// so a charge that is wider than the reach still converges after
-/// `ceil(width / BANG_FLOOD_ROUNDS)` frames. 16 arms a 32-pixel-wide charge in
-/// two frames and costs two `pipe::FLOOD_ROUNDS` cascades (8 rounds each), every
-/// one of them an early-exit pass over the pixel grid.
-pub(crate) const BANG_FLOOD_ROUNDS: u32 = 16;
-
-/// Sentinel written by [`bang_flood_kernel`] into a run pixel of a charge that
-/// the persistent arming wave reached this frame.
+/// Sentinel written by the flood drain into a run pixel of a charge that the
+/// arming flood reached this frame.
 ///
 /// TPT's `flood_prop` writes the final value `2` into the whole run in one
 /// call, but this port runs the flood *before* [`explosive_reaction_kernel`]: a
@@ -53,109 +43,6 @@ pub(crate) const BANG_ARMED_NEXT_FRAME: i32 = -2;
 /// this frame" mark through the run; the explosive pass restarts the countdown
 /// from `2` so the reset pixel cannot jump straight back to `3`.
 pub(crate) const BANG_REARMED: i32 = -1;
-
-/// `tmp` of the `BANG` pixel at `(x, y)`, or `0` when the pixel holds anything
-/// else.
-#[cube]
-fn bang_tmp_at(
-    pmap: &[u32],
-    part_ty: &[u32],
-    part_tmp: &mut [i32],
-    xres: u32,
-    yres: u32,
-    x: i32,
-    y: i32,
-) -> i32 {
-    let mut tmp = 0i32;
-    let nv = pmap_at(pmap, xres, yres, x, y);
-    if nv != 0u32 {
-        let ns = pmap_slot(nv);
-        if part_ty[ns] == PT_BANG {
-            tmp = part_tmp[ns];
-        }
-    }
-    tmp
-}
-
-/// One round of the connected-`BANG` arming flood (`BANG.cpp:74-80`).
-///
-/// TPT does not advance `tmp` one pixel at a time: the first `BANG` that sees
-/// fire (`tmp == 1`) calls `flood_prop(x, y, AccessProperty{ FIELD_TMP, 2 })`,
-/// which writes `2` into the `tmp` of **every** pixel of the run — the
-/// reference expands the horizontal run and then pushes the rows above and
-/// below, i.e. a 4-connected flood (`Simulation.cpp:520-570`). The whole charge
-/// therefore detonates as one mass.
-///
-/// A dispatch can only carry the mark one hop, so this kernel runs
-/// [`BANG_FLOOD_ROUNDS`] times per frame:
-///
-/// * an unarmed pixel (`tmp == 0`) takes [`BANG_ARMED_NEXT_FRAME`] from any
-///   4-connected `BANG` neighbour that carries a mark;
-/// * a pixel already in the countdown (`2` or `3`) takes [`BANG_REARMED`] from a
-///   neighbour that is a fresh seed (`1`) or already re-armed, mirroring the
-///   unconditional `changeProperty.Set` of the reference flood.
-///
-/// Both sentinels are outside the countdown, so the explosive pass can turn
-/// them into `2` before it advances the pixels that were already armed. Marked
-/// pixels are read-only for the remaining rounds; the neighbours still at zero
-/// pick the wave up on the next dispatch. Every thread writes only its own
-/// slot.
-#[cube(launch_unchecked)]
-pub(crate) fn bang_flood_kernel(
-    pmap: &[u32],
-    part_ty: &[u32],
-    part_tmp: &mut [i32],
-    xres: u32,
-    yres: u32,
-) {
-    let idx = ABSOLUTE_POS;
-    if idx >= (xres * yres) as usize {
-        terminate!();
-    }
-    let v = pmap[idx];
-    if v == 0u32 {
-        terminate!();
-    }
-    let id = pmap_slot(v);
-    if part_ty[id] != PT_BANG {
-        terminate!();
-    }
-    let tmp = part_tmp[id];
-    if tmp == BANG_ARMED_NEXT_FRAME || tmp == BANG_REARMED {
-        terminate!();
-    }
-    let px = (idx as u32 % xres) as i32;
-    let py = (idx as u32 / xres) as i32;
-    let mut reached = false;
-    let mut rearm = false;
-    for n in 0u32..4u32 {
-        let mut dx = 0i32;
-        let mut dy = 0i32;
-        if n == 0u32 {
-            dx = -1i32;
-        } else if n == 1u32 {
-            dx = 1i32;
-        } else if n == 2u32 {
-            dy = -1i32;
-        } else {
-            dy = 1i32;
-        }
-        let nt = bang_tmp_at(pmap, part_ty, part_tmp, xres, yres, px + dx, py + dy);
-        if nt != 0i32 {
-            reached = true;
-        }
-        if nt == 1i32 || nt == BANG_REARMED {
-            rearm = true;
-        }
-    }
-    if tmp == 0i32 {
-        if reached {
-            part_tmp[id] = BANG_ARMED_NEXT_FRAME;
-        }
-    } else if (tmp == 2i32 || tmp == 3i32) && rearm {
-        part_tmp[id] = BANG_REARMED;
-    }
-}
 
 /// `BOMB`, `DEST`, `BANG` and `EMBR`.
 ///
@@ -378,11 +265,11 @@ pub(crate) fn explosive_reaction_kernel(
                         }
                     }
                 } else if ty == PT_BANG {
-                    // `BANG.cpp:50-122`. The `tmp == 1` mass flood is
-                    // [`bang_flood_kernel`], which runs [`BANG_FLOOD_ROUNDS`]
-                    // rounds before this pass and marks every 4-connected
-                    // `BANG` of the run, so a charge arms as one mass instead
-                    // of one 3x3 layer per frame.
+                    // `BANG.cpp:50-122`. The `tmp == 1` mass flood runs before
+                    // this pass: the `flood_component` seed scan queues every
+                    // fresh seed and its drain marks every 4-connected `BANG`
+                    // of the run, so a charge arms as one mass instead of one
+                    // 3x3 layer per frame.
                     let mut tmp = part_tmp[id];
                     if tmp == BANG_ARMED_NEXT_FRAME || tmp == BANG_REARMED {
                         // The flood reached this pixel earlier this frame.
@@ -713,51 +600,44 @@ mod tests {
     use super::super::{hash_u32_host, rng_kick_host};
     use super::*;
 
-    /// Host mirror of one frame of the `BANG` pipeline: the flood rounds run
-    /// before the explosive pass, exactly like `launch_combustion_pass`.
+    /// Host mirror of one frame of the `BANG` pipeline: the flood runs before
+    /// the explosive pass, exactly like `launch_combustion_pass`.
     ///
     /// `ignite` is the pixel that sees fire and enters `tmp == 1`; every other
-    /// pixel waits for the flood.
+    /// pixel waits for the flood. The flood is a 4-connected walk from every
+    /// `tmp == 1` seed over the whole run, mirroring the device seed scan +
+    /// drain in `reaction_kernel::flood_component`.
     fn tnt_frame(tmp: &mut [i32], types: &mut [u32], width: i32, ignite: Option<usize>) {
         let height = tmp.len() as i32 / width;
-        for _ in 0..BANG_FLOOD_ROUNDS {
-            let prev = tmp.to_vec();
-            for i in 0..tmp.len() {
-                if types[i] != PT_BANG {
+        let mut visited = vec![false; tmp.len()];
+        let mut queue = Vec::new();
+        for i in 0..tmp.len() {
+            if types[i] == PT_BANG && tmp[i] == 1 {
+                visited[i] = true;
+                queue.push(i);
+            }
+        }
+        while let Some(i) = queue.pop() {
+            let x = i as i32 % width;
+            let y = i as i32 / width;
+            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let nx = x + dx;
+                let ny = y + dy;
+                if nx < 0 || ny < 0 || nx >= width || ny >= height {
                     continue;
                 }
-                let t = prev[i];
-                if t == BANG_ARMED_NEXT_FRAME || t == BANG_REARMED {
+                let j = (ny * width + nx) as usize;
+                if visited[j] || types[j] != PT_BANG {
                     continue;
                 }
-                let x = i as i32 % width;
-                let y = i as i32 / width;
-                let mut reached = false;
-                let mut rearm = false;
-                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    let nx = x + dx;
-                    let ny = y + dy;
-                    if nx < 0 || ny < 0 || nx >= width || ny >= height {
-                        continue;
-                    }
-                    let j = (ny * width + nx) as usize;
-                    if types[j] != PT_BANG {
-                        continue;
-                    }
-                    if prev[j] != 0 {
-                        reached = true;
-                    }
-                    if prev[j] == 1 || prev[j] == BANG_REARMED {
-                        rearm = true;
-                    }
-                }
+                visited[j] = true;
+                let t = tmp[j];
                 if t == 0 {
-                    if reached {
-                        tmp[i] = BANG_ARMED_NEXT_FRAME;
-                    }
-                } else if (t == 2 || t == 3) && rearm {
-                    tmp[i] = BANG_REARMED;
+                    tmp[j] = BANG_ARMED_NEXT_FRAME;
+                } else if t == 2 || t == 3 {
+                    tmp[j] = BANG_REARMED;
                 }
+                queue.push(j);
             }
         }
         for i in 0..tmp.len() {

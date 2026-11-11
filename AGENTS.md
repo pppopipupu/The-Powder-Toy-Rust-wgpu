@@ -59,7 +59,7 @@ tpt-core --> (pure data and constants; no GPU, windowing or I/O dependencies)
 ## Lua Bridge
 
 - `LuaScriptingEngine` shares `Rc<RefCell<LuaBridgeState>>` with `'static` closures; `run_attached` installs the engine through an RAII guard and rejects re-entry.
-- Built-in elements are `0..195`; custom elements are `195..PT_NUM`. `elem.DEFAULT_PT_*` covers all 195 TPT names.
+- Built-in elements are `0..BUILTIN_ELEMENT_COUNT`: the 195 reference ids then the 44 Cracker1000 mod ids (`195..239`). Custom Lua elements take `239..PT_NUM`. `elem.DEFAULT_PT_*` covers all 239 built-in names.
 - `sim.signs` is a live proxy, never a copy: `#`, indexing, `new` and `delete` mutate `SimulationEngine::signs`.
 - `ren` toggles are `SimulationConfig` fields shared by scripts and UI; `separateThread` and `depth3d` stay documented no-ops.
 

@@ -139,6 +139,11 @@ impl Prefs {
             MAX_UNDO_HISTORY_LIMIT,
         );
         self.pretty_powder = get_bool(entries, keys::PRETTY_POWDER, self.pretty_powder);
+        self.mod_elements_enabled = get_bool(
+            entries,
+            keys::ENABLE_MOD_ELEMENTS,
+            self.mod_elements_enabled,
+        );
 
         // Not persisted by the C++ game, but useful for this front-end.
         self.heat_enable = get_bool(entries, keys::HEAT_SIMULATION, self.heat_enable);
@@ -301,6 +306,11 @@ impl Prefs {
         set_bool(entries, keys::INCLUDE_PRESSURE, self.include_pressure);
         set_u32(entries, keys::UNDO_HISTORY_LIMIT, self.undo_history_limit);
         set_bool(entries, keys::PRETTY_POWDER, self.pretty_powder);
+        set_bool(
+            entries,
+            keys::ENABLE_MOD_ELEMENTS,
+            self.mod_elements_enabled,
+        );
         set_bool(entries, keys::HEAT_SIMULATION, self.heat_enable);
         set_bool(entries, keys::WATER_EQUALISATION, self.water_equal_test);
         set_u32(entries, keys::AIR_MODE, self.air_mode);
@@ -800,6 +810,7 @@ mod tests {
             custom_gravity_y: -1.0,
             edge_mode: 2, // Loop
             pretty_powder: true,
+            mod_elements_enabled: false,
             display_mode: DISPLAY_EFFE | DISPLAY_AIRP,
             render_mode: RENDER_BASC | RENDER_BLOB,
             colour_mode: COLOUR_DEST,
@@ -824,6 +835,7 @@ mod tests {
             "Simulation.CustomGravityY",
             "Simulation.EdgeMode",
             "Simulation.PrettyPowder",
+            "Simulation.EnableModElements",
             "Renderer.DisplayMode",
             "Renderer.RenderMode",
             "Renderer.ColourMode",
@@ -854,6 +866,7 @@ mod tests {
         assert!((loaded.custom_gravity_y + 1.0).abs() < 1e-6);
         assert_eq!(loaded.edge_mode, 2);
         assert!(loaded.pretty_powder);
+        assert!(!loaded.mod_elements_enabled);
         assert_eq!(loaded.display_mode, DISPLAY_EFFE | DISPLAY_AIRP);
         assert_eq!(loaded.render_mode, RENDER_BASC | RENDER_BLOB);
         assert_eq!(loaded.colour_mode, COLOUR_DEST);

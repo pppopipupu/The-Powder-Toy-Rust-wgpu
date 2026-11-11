@@ -8,6 +8,8 @@
 //! [`batch1`] and [`batch2`] are the exceptions: they hold the elements whose
 //! ids were appended above the classic ones (`PT_GOO ..= PT_SEED`) and
 //! therefore keep TPT's element order instead of grouping by category.
+//! [`modext`] continues that appending convention with the mod's own 44
+//! elements (`PT_FNTC ..= PT_MGNT`).
 
 pub(super) mod batch1;
 pub(super) mod batch2;
@@ -17,6 +19,7 @@ pub(super) mod batch2c;
 pub(super) mod energy;
 pub(super) mod gases;
 pub(super) mod liquids;
+pub(super) mod modext;
 pub(super) mod powders;
 pub(super) mod solids;
 pub(super) mod special;

@@ -138,7 +138,7 @@ pub(crate) mod thermite;
 pub(super) use self::carbonated::carbonated_kernel;
 pub(super) use self::devices::{emp_kernel, tron_kernel};
 pub(super) use self::explosives::{
-    BANG_FLOOD_ROUNDS, bang_flood_kernel, explosive_reaction_kernel, fuse_kernel,
+    BANG_ARMED_NEXT_FRAME, BANG_REARMED, explosive_reaction_kernel, fuse_kernel,
 };
 pub(super) use self::fire::combustion_reaction_kernel;
 pub(super) use self::fireworks::firework_kernel;

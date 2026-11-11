@@ -98,6 +98,9 @@ fn main() {
             "  --bench [ticks]   Run {BENCH_DEFAULT_TICKS} timed GPU simulation + render ticks"
         );
         println!("                    on a 612x384 scene and print per-frame timings.");
+        println!("                    --canvas WxH picks the canvas size,");
+        println!("                    --scene NAME picks empty, fluids, fluids+rigid, plasma,");
+        println!("                    plasma-fancy or a comma-separated list of them.");
         println!(
             "  --save-smoke [side]  Create a {SAVE_SMOKE_SIDE}x{SAVE_SMOKE_SIDE} canvas, save it,"
         );
@@ -122,7 +125,21 @@ fn main() {
             .get(pos + 1)
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(BENCH_DEFAULT_TICKS);
-        std::process::exit(run_bench(ticks));
+        let canvas = match parse_bench_canvas(&args) {
+            Ok(canvas) => canvas,
+            Err(err) => {
+                eprintln!("[bench] FAIL: {err}");
+                std::process::exit(2);
+            }
+        };
+        let scenes = match parse_bench_scenes(&args) {
+            Ok(scenes) => scenes,
+            Err(err) => {
+                eprintln!("[bench] FAIL: {err}");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(run_bench(ticks, canvas, &scenes));
     }
 
     let windowed_smoke = args
@@ -338,9 +355,136 @@ fn create_headless_gpu(label: &str) -> Result<HeadlessGpu, String> {
     })
 }
 
+/// Scenes the benchmark can seed on a canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchScene {
+    Empty,
+    Fluids,
+    FluidsRigid,
+    Plasma,
+    PlasmaFancy,
+}
+
+/// Scenes run by `--bench` when `--scene` is absent, in this order.
+///
+/// The fluid-only scene is the configuration the original TPT can run; the
+/// rigid scene adds the body whose CPU solver reads the particle pool back
+/// every frame; the plasma scenes keep a dense glow alive so the
+/// glow/fire render passes, which scale with glowing pixels, are covered.
+const BENCH_SCENES: [BenchScene; 4] = [
+    BenchScene::Fluids,
+    BenchScene::FluidsRigid,
+    BenchScene::Plasma,
+    BenchScene::PlasmaFancy,
+];
+
+impl BenchScene {
+    fn label(self) -> &'static str {
+        match self {
+            BenchScene::Empty => "empty",
+            BenchScene::Fluids => "fluids",
+            BenchScene::FluidsRigid => "fluids+rigid",
+            BenchScene::Plasma => "plasma",
+            BenchScene::PlasmaFancy => "plasma-fancy",
+        }
+    }
+
+    fn render_mode(self) -> u32 {
+        match self {
+            BenchScene::PlasmaFancy => RENDER_FANCY,
+            _ => RENDER_DEFAULT,
+        }
+    }
+
+    /// Plasma dies within ~200 ticks, so the timed loop re-seeds it.
+    fn keeps_plasma(self) -> bool {
+        matches!(self, BenchScene::Plasma | BenchScene::PlasmaFancy)
+    }
+
+    /// Populates a freshly cleared canvas.
+    fn seed(self, state: &mut AppState, width: u32, height: u32) {
+        match self {
+            BenchScene::Empty => {}
+            BenchScene::Fluids => seed_bench_scene(state, width, height, false),
+            BenchScene::FluidsRigid => seed_bench_scene(state, width, height, true),
+            // The plasma scenes keep the fluid scene underneath so the glow
+            // passes run over the workload the default scenes also use.
+            BenchScene::Plasma | BenchScene::PlasmaFancy => {
+                seed_bench_scene(state, width, height, false);
+                seed_bench_plasma(state, width, height);
+            }
+        }
+    }
+}
+
+/// Parses `--canvas WIDTHxHEIGHT` for `--bench`.
+fn parse_bench_canvas(args: &[String]) -> Result<(u32, u32), String> {
+    let Some(pos) = args.iter().position(|arg| arg == "--canvas") else {
+        return Ok(BENCH_CANVAS);
+    };
+    let value = args
+        .get(pos + 1)
+        .ok_or_else(|| "--canvas needs WIDTHxHEIGHT".to_string())?;
+    let Some((width, height)) = value.split_once(['x', 'X']) else {
+        return Err(format!(
+            "invalid --canvas value `{value}`, expected WIDTHxHEIGHT"
+        ));
+    };
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| format!("invalid --canvas width in `{value}`"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| format!("invalid --canvas height in `{value}`"))?;
+    if width == 0 || height == 0 {
+        return Err(format!("--canvas `{value}` needs non-zero dimensions"));
+    }
+    Ok((width, height))
+}
+
+/// Parses `--scene` for `--bench`; defaults to [`BENCH_SCENES`].
+fn parse_bench_scenes(args: &[String]) -> Result<Vec<BenchScene>, String> {
+    let Some(pos) = args.iter().position(|arg| arg == "--scene") else {
+        return Ok(BENCH_SCENES.to_vec());
+    };
+    let value = args
+        .get(pos + 1)
+        .ok_or_else(|| "--scene needs a scene name".to_string())?;
+    let mut scenes = Vec::new();
+    for name in value.split(',') {
+        let scene = match name.trim() {
+            "all" => {
+                for scene in BENCH_SCENES {
+                    if !scenes.contains(&scene) {
+                        scenes.push(scene);
+                    }
+                }
+                continue;
+            }
+            "empty" => BenchScene::Empty,
+            "fluids" => BenchScene::Fluids,
+            "fluids+rigid" => BenchScene::FluidsRigid,
+            "plasma" => BenchScene::Plasma,
+            "plasma-fancy" => BenchScene::PlasmaFancy,
+            other => {
+                return Err(format!(
+                    "unknown --scene `{other}`, expected empty, fluids, fluids+rigid, plasma, plasma-fancy or all"
+                ));
+            }
+        };
+        if !scenes.contains(&scene) {
+            scenes.push(scene);
+        }
+    }
+    if scenes.is_empty() {
+        return Err("--scene needs at least one scene name".to_string());
+    }
+    Ok(scenes)
+}
+
 /// Runs the timed benchmark and returns the process exit code.
-fn run_bench(ticks: u32) -> i32 {
-    match bench_inner(ticks) {
+fn run_bench(ticks: u32, canvas: (u32, u32), scenes: &[BenchScene]) -> i32 {
+    match bench_inner(ticks, canvas, scenes) {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("[bench] FAIL: {err}");
@@ -349,9 +493,62 @@ fn run_bench(ticks: u32) -> i32 {
     }
 }
 
-/// Measures `step + render_gpu` on a full 612x384 scene with a GPU sync every
-/// frame, which is the cost the interactive loop pays when it is GPU-bound.
-fn bench_inner(ticks: u32) -> Result<(), String> {
+/// Per-frame timing spread in milliseconds.
+struct BenchStats {
+    mean: f64,
+    p50: f64,
+    p95: f64,
+    min: f64,
+    max: f64,
+}
+
+impl BenchStats {
+    fn from_samples(mut samples: Vec<Duration>) -> Self {
+        if samples.is_empty() {
+            return Self {
+                mean: 0.0,
+                p50: 0.0,
+                p95: 0.0,
+                min: 0.0,
+                max: 0.0,
+            };
+        }
+        let count = samples.len();
+        samples.sort_unstable();
+        let to_ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let total_ms: f64 = samples.iter().map(|&d| to_ms(d)).sum();
+        // Nearest-rank percentile: the sample the given fraction of frames stay under.
+        let percentile = |fraction: f64| {
+            let rank = ((count as f64 * fraction).ceil() as usize).clamp(1, count);
+            to_ms(samples[rank - 1])
+        };
+        Self {
+            mean: total_ms / count as f64,
+            p50: percentile(0.50),
+            p95: percentile(0.95),
+            min: to_ms(samples[0]),
+            max: to_ms(samples[count - 1]),
+        }
+    }
+}
+
+/// Blocks until every queued GPU command finished, so the wall clock measures
+/// the passes that were just issued instead of command recording.
+fn poll_gpu(gpu: &HeadlessGpu) {
+    let _ = gpu.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+}
+
+/// Measures frame generation (the `step` + `render_gpu` pair the interactive
+/// loop submits per frame) on `canvas` with a GPU sync every frame.
+///
+/// `frame` is the wall clock of one whole tick: host command recording plus
+/// both GPU submissions and their completion, which is what the windowed loop
+/// pays when it is GPU-bound. Samples are reported as mean/p50/p95/min/max so a
+/// single driver hiccup cannot move the number.
+fn bench_inner(ticks: u32, canvas: (u32, u32), scenes: &[BenchScene]) -> Result<(), String> {
     let gpu = create_headless_gpu("tpt-bench-device")?;
     println!(
         "[bench] adapter: {} ({:?}, backend {:?})",
@@ -359,26 +556,13 @@ fn bench_inner(ticks: u32) -> Result<(), String> {
     );
 
     let mut state = AppState::new(gpu.client.clone());
-    let (width, height) = state.start_new_canvas(BENCH_CANVAS.0, BENCH_CANVAS.1);
+    let (width, height) = state.start_new_canvas(canvas.0, canvas.1);
+    println!("[bench] canvas: {width}x{height}");
 
-    // Measure the fluid-only scene first (the configuration the original TPT
-    // can run), then the same scene with one rigid body, whose CPU solver has
-    // to read the particle pool back every frame.
-    // The third scene keeps a dense plasma cloud alive (plasma dies within
-    // ~200 ticks, so it is re-seeded periodically) to expose the cost of the
-    // glow/fire render passes, which scale with the number of glowing pixels.
-    for (label, with_rigid, with_plasma, render_mode) in [
-        ("fluids", false, false, RENDER_DEFAULT),
-        ("fluids+rigid", true, false, RENDER_DEFAULT),
-        ("plasma", false, true, RENDER_DEFAULT),
-        ("plasma-fancy", false, true, RENDER_FANCY),
-    ] {
+    for &scene in scenes {
         state.engine.clear();
-        state.engine.bufs.config.render_mode = render_mode;
-        seed_bench_scene(&mut state, width, height, with_rigid);
-        if with_plasma {
-            seed_bench_plasma(&mut state, width, height);
-        }
+        state.engine.bufs.config.render_mode = scene.render_mode();
+        scene.seed(&mut state, width, height);
         // Upload the seeded scene before the clock starts.
         state.engine.bufs.sync_host_to_gpu();
         state.engine.bufs.refresh_active_count_device();
@@ -387,40 +571,35 @@ fn bench_inner(ticks: u32) -> Result<(), String> {
             state.engine.step();
             state.engine.render_gpu();
         }
-        let _ = gpu.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+        poll_gpu(&gpu);
 
-        let mut step_time = Duration::ZERO;
-        let mut render_time = Duration::ZERO;
-        let started = Instant::now();
+        let mut step_samples = Vec::with_capacity(ticks as usize);
+        let mut render_samples = Vec::with_capacity(ticks as usize);
+        let mut frame_samples = Vec::with_capacity(ticks as usize);
         for tick in 0..ticks {
-            if with_plasma && tick % 40 == 0 {
+            // Re-seeding is benchmark bookkeeping, not frame cost, so it stays
+            // outside the sampled interval.
+            if scene.keeps_plasma() && tick % 40 == 0 {
                 seed_bench_plasma(&mut state, width, height);
             }
-            let mark = Instant::now();
+            let frame_started = Instant::now();
             state.engine.step();
             // Draining the queue between the two halves attributes the GPU
             // time to the pass that issued it; without it `step` only measures
             // command recording and the whole cost lands in the final poll.
-            let _ = gpu.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
-            step_time += mark.elapsed();
+            poll_gpu(&gpu);
+            let step_ended = Instant::now();
 
-            let mark = Instant::now();
             state.engine.render_gpu();
             // The kernels are asynchronous; waiting every frame turns the wall
             // clock into the real frame cost.
-            let _ = gpu.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
-            render_time += mark.elapsed();
+            poll_gpu(&gpu);
+            let render_ended = Instant::now();
+
+            step_samples.push(step_ended - frame_started);
+            render_samples.push(render_ended - step_ended);
+            frame_samples.push(render_ended - frame_started);
         }
-        let total = started.elapsed();
 
         let particles = state.engine.bufs.particle_count();
         let bodies = state
@@ -430,16 +609,31 @@ fn bench_inner(ticks: u32) -> Result<(), String> {
             .iter()
             .filter(|body| body.active)
             .count();
-        let step_ms = step_time.as_secs_f64() * 1000.0 / ticks.max(1) as f64;
-        let render_ms = render_time.as_secs_f64() * 1000.0 / ticks.max(1) as f64;
-        let frame_ms = total.as_secs_f64() * 1000.0 / ticks.max(1) as f64;
+        let step = BenchStats::from_samples(step_samples);
+        let render = BenchStats::from_samples(render_samples);
+        let frame = BenchStats::from_samples(frame_samples);
         println!(
-            "[bench] {label}: canvas {}x{} ticks={} particles={} rigid_bodies={}",
-            BENCH_CANVAS.0, BENCH_CANVAS.1, ticks, particles, bodies
+            "[bench] {}: canvas {}x{} ticks={} particles={} rigid_bodies={}",
+            scene.label(),
+            width,
+            height,
+            ticks,
+            particles,
+            bodies
         );
         println!(
-            "[bench] {label}: step={step_ms:.3} ms render={render_ms:.3} ms frame={frame_ms:.3} ms -> {:.1} fps",
-            1000.0 / frame_ms.max(f64::EPSILON)
+            "[bench] {}: frame mean={:.3} p50={:.3} p95={:.3} min={:.3} max={:.3} ms -> {:.1} fps | step mean={:.3} p95={:.3} ms | render mean={:.3} p95={:.3} ms",
+            scene.label(),
+            frame.mean,
+            frame.p50,
+            frame.p95,
+            frame.min,
+            frame.max,
+            1000.0 / frame.mean.max(f64::EPSILON),
+            step.mean,
+            step.p95,
+            render.mean,
+            render.p95
         );
     }
     Ok(())

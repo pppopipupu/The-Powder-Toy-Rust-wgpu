@@ -536,6 +536,7 @@ fn draw_transport_row(ui: &mut Ui, state: &mut AppState) {
 mod tests {
     use super::*;
     use egui::{Rect, pos2, vec2};
+    use tpt_core::constants::BUILTIN_ELEMENT_COUNT;
 
     /// Height of a top bar built from [`telemetry_row`] with `text` inside it.
     fn bar_height(text: &str) -> f32 {
@@ -571,7 +572,7 @@ mod tests {
     /// (`LITH.cpp:71`), not the element that shares the numeric value.
     #[test]
     fn ctype_prints_the_stored_energy_for_lithium() {
-        let all_elements = |id: u32| id < 195;
+        let all_elements = |id: u32| id < BUILTIN_ELEMENT_COUNT as u32;
         assert_eq!(
             ctype_field(tpt_core::constants::PT_LITH, 3, 0, all_elements),
             CtypeField::Number(3)
@@ -586,7 +587,7 @@ mod tests {
     /// print the raw value even when it names a real element.
     #[test]
     fn ctype_prints_raw_values_for_overloaded_elements() {
-        let all_elements = |id: u32| id < 195;
+        let all_elements = |id: u32| id < BUILTIN_ELEMENT_COUNT as u32;
         for ty in [
             tpt_core::constants::PT_PHOT,
             tpt_core::constants::PT_FILT,
@@ -606,7 +607,7 @@ mod tests {
     /// family splits the stored `life` out of the high bits.
     #[test]
     fn ctype_resolves_element_ids_for_clones_and_rays() {
-        let all_elements = |id: u32| id < 195;
+        let all_elements = |id: u32| id < BUILTIN_ELEMENT_COUNT as u32;
         assert_eq!(
             ctype_field(
                 tpt_core::constants::PT_CLNE,

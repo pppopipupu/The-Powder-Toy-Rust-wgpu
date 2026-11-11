@@ -243,6 +243,16 @@ impl SimBuffers {
         if ty == PT_NONE || ty as usize >= registry.elements.len() {
             return None;
         }
+        // The port's "Enable Cracker1000 mod elements" switch: a user placement
+        // must not create a mod element while it is off. `SkipChecks` is the
+        // save and region loader, which has to keep restoring particles that
+        // already exist; their simulation is never gated.
+        if source != CreationSource::SkipChecks
+            && is_mod_element(ty)
+            && !self.config.mod_elements_enabled
+        {
+            return None;
+        }
         let pixel = self.pixel_index(x, y)?;
         let energy = self.is_energy_type(ty);
 
@@ -375,6 +385,7 @@ impl SimBuffers {
         }
         let accepted = match hook {
             CtypeDraw::None | CtypeDraw::Basic | CtypeDraw::ValueInCtype => true,
+            CtypeDraw::ValueInCtypeLigh => true,
             CtypeDraw::ValueInTmp => true,
             CtypeDraw::Cray => true,
             CtypeDraw::Stor => (registry.get(t).properties & TYPE_SOLID) == 0,
@@ -387,7 +398,7 @@ impl SimBuffers {
         self.part_ctype[occ] = t;
         match hook {
             // `Element::ctypeDrawVInCtype` keeps the value bits above the id.
-            CtypeDraw::ValueInCtype | CtypeDraw::Cray => {
+            CtypeDraw::ValueInCtype | CtypeDraw::ValueInCtypeLigh | CtypeDraw::Cray => {
                 self.part_ctype[occ] |= (v as u32) << PMAP_ID_BITS;
             }
             // `Element::ctypeDrawVInTmp` stores the value in `tmp` for `LIFE`.
@@ -401,6 +412,13 @@ impl SimBuffers {
                 self.part_ctype[occ] |= 30u32 << PMAP_ID_BITS;
             }
             self.part_temp[occ] = registry.get(t).default_temp;
+        }
+        // `CSNS.cpp:163-175` and `PROJ.cpp:115-124`: the ctype sensor and the
+        // projectile accept a painted element like `ctypeDrawVInCtype`, and a
+        // painted `LIGH` additionally gets `PMAPID(30)`, i.e. the bolt's
+        // default 30-unit power in the bits above the element id.
+        if hook == CtypeDraw::ValueInCtypeLigh && t == PT_LIGH {
+            self.part_ctype[occ] |= 30u32 << PMAP_ID_BITS;
         }
         self.mark_particle_slot_dirty(occ);
         true
@@ -865,6 +883,55 @@ impl SimBuffers {
                 self.part_tmp3[id] = ((roll >> 14) & 0x7FFF) as i32;
                 self.part_tmp4[id] = ((roll >> 21) & 0x7FFF) as i32;
             }
+            // The second element set (`PT_FNTC`..`PT_MGNT`, ids `195..=238`).
+            // `CLNT.cpp:86-89`: the thermostat's cooling target, in Celsius.
+            PT_CLNT => self.part_tmp[id] = 22,
+            // `CWIR.cpp:93-96`: the wire's melting point, in Kelvin.
+            PT_CWIR => self.part_tmp2[id] = 2000,
+            // `CEXP.cpp:91-97`: `temp` is the blast temperature, `life` the
+            // blast pressure, `tmp` the fuse length and the charge starts as
+            // plasma rather than as a solid.
+            PT_CEXP => {
+                self.part_temp[id] = 9720.0;
+                self.part_ctype[id] = PT_PLSM;
+                self.part_tmp[id] = 100;
+                self.part_life[id] = 256;
+            }
+            // `LED.cpp:95-98`: a fresh LED is white so the decoration colour
+            // immediately shows.
+            PT_LED => self.part_dcolour[id] = 0xFFFF_FFFF,
+            // `GRPH.cpp:169-173`: `tmp2 = rng.between(0, 5)`, ignition countdown.
+            PT_GRPH => {
+                self.part_tmp2[id] = (roll % 6) as i32;
+                self.part_tmp3[id] = 100;
+            }
+            // `DFOM.cpp:160-165`: the foam remembers its spawn pixel and a 40
+            // frame coalesce timer.
+            PT_DFOM => {
+                self.part_tmp[id] = x;
+                self.part_tmp2[id] = y;
+                self.part_tmp3[id] = 40;
+            }
+            // `MISL.cpp:148-152`: target `x = rng.between(1, 610)`,
+            // `y = rng.between(1, 380)`.
+            PT_MISL => {
+                self.part_tmp[id] = 1 + (roll % 610) as i32;
+                self.part_tmp2[id] = 1 + (roll % 380) as i32;
+            }
+            // `PRMT.cpp:107-110`: `tmp2 = rng.between(0, 10)`.
+            PT_PRMT => self.part_tmp2[id] = (roll % 11) as i32,
+            // `UVRD.cpp:129-135`: five frames of travel at 2 px/frame along a
+            // random `rng.between(0, 359)` degree heading.
+            PT_UVRD => {
+                self.part_life[id] = 5;
+                let a = (roll % 360) as f32 * (core::f32::consts::PI / 180.0);
+                self.part_vx[id] = 2.0 * a.cos();
+                self.part_vy[id] = 2.0 * a.sin();
+            }
+            // `ALMP.cpp:158-161`: `tmp2 = rng.between(0, 6)`.
+            PT_ALMP => self.part_tmp2[id] = (roll % 7) as i32,
+            // `BFLM.cpp:103-106`: `life = rng.between(80, 120)`.
+            PT_BFLM => self.part_life[id] = 80 + (roll % 41) as i32,
             _ => {}
         }
     }

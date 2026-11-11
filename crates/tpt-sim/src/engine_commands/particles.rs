@@ -131,12 +131,22 @@ impl SimulationEngine {
         if elem_ty == PT_NONE || elem_ty as usize >= self.registry.elements.len() {
             return;
         }
+        // The device flood materialises through the creation queue, not
+        // `create_part`, so the mod switch has to refuse the fill here.
+        if is_mod_element(elem_ty) && !self.bufs.config.mod_elements_enabled {
+            return;
+        }
         crate::flood_kernel::flood_fill_device(&mut self.bufs, x, y, elem_ty);
     }
 
     /// Create exactly one particle, optionally with an initial velocity.
     pub(super) fn spawn_particle(&mut self, x: i32, y: i32, elem_ty: u32, vx: f32, vy: f32) {
         if elem_ty == PT_NONE || elem_ty as usize >= self.registry.elements.len() {
+            return;
+        }
+        // The spawn tool allocates directly instead of going through
+        // `create_part`, so it repeats the mod switch's refusal.
+        if is_mod_element(elem_ty) && !self.bufs.config.mod_elements_enabled {
             return;
         }
         if self.bufs.gpu_dirty {

@@ -204,6 +204,9 @@ pub struct Prefs {
     pub undo_history_limit: u32,
     /// `Simulation.PrettyPowder`: prettier (slower) powder rendering.
     pub pretty_powder: bool,
+    /// `Simulation.EnableModElements` (port-only): allow creating the Cracker
+    /// TPT mod elements. Saved particles keep simulating either way.
+    pub mod_elements_enabled: bool,
     /// `Simulation.HeatSimulation`: heat conduction and phase changes.
     ///
     /// The C++ game does not persist this one, but keeping it makes the
@@ -347,6 +350,7 @@ impl Prefs {
         config.render_mode = self.render_mode;
         config.fire_intensity = self.fire_intensity;
         config.pretty_powder = self.pretty_powder;
+        config.mod_elements_enabled = self.mod_elements_enabled;
         config.temperature_scale = self.temperature_scale;
     }
 
@@ -373,6 +377,7 @@ impl Prefs {
         self.render_mode = config.render_mode;
         self.fire_intensity = config.fire_intensity;
         self.pretty_powder = config.pretty_powder;
+        self.mod_elements_enabled = config.mod_elements_enabled;
         self.temperature_scale = config.temperature_scale;
     }
 

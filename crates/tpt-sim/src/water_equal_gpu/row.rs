@@ -12,7 +12,7 @@ use tpt_core::constants::{PT_NUM, TYPE_LIQUID};
 use crate::move_kernel::wall_blocks_particle;
 
 const PT_NUM_U32: u32 = PT_NUM as u32;
-const _: () = assert!(PT_NUM == 200);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 const _: () = assert!(TYPE_LIQUID == 2);
 
 #[cube]

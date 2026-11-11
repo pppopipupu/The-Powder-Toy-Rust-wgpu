@@ -196,7 +196,7 @@ pub(super) const FLOOD_ROUNDS: u32 = 8;
 
 pub(super) const PMAP_TYPE: u32 = 0x1FF;
 pub(super) const PT_NUM_U32: u32 = PT_NUM as u32;
-const _: () = assert!(PT_NUM == 200);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 
 pub(super) const MOVABLE_MASK: u32 = TYPE_PART | TYPE_LIQUID | TYPE_GAS | TYPE_ENERGY;
 

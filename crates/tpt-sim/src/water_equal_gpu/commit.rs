@@ -10,7 +10,7 @@ use cubecl::prelude::*;
 use tpt_core::constants::PT_NUM;
 
 const PT_NUM_U32: u32 = PT_NUM as u32;
-const _: () = assert!(PT_NUM == 200);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 
 #[cube(launch_unchecked)]
 pub fn water_commit_kernel(

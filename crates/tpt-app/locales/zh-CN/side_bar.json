@@ -1,5 +1,4 @@
 {
-  "bound_tools": "已绑定工具",
   "cat_electronics": "电子",
   "cat_explosives": "爆炸物",
   "cat_force": "力场",
@@ -20,12 +19,11 @@
   "element_search_empty": "没有匹配的元素或工具",
   "element_search_placeholder": "输入名称、描述或分类",
   "element_search_title": "元素搜索",
-  "selected_element_hint": "SMPL / PART 工具使用当前选中的元素",
   "stamps_delete": "删除",
   "stamps_delete_confirm": "永久删除",
   "stamps_delete_prompt": "确定删除印章“{0}”？",
-  "stamps_empty": "暂无印章 — 按 Ctrl+S 并拖动以截取。",
-  "stamps_help": "Ctrl+S 截取印章 · L 放置最新印章",
+  "stamps_empty": "暂无印章——在模拟视图中捕获一个。",
+  "stamps_help": "点击“放置”使用选中的印章。",
   "stamps_in": "印章位于 ./{0}",
   "stamps_place": "放置",
   "stamps_title": "印章"

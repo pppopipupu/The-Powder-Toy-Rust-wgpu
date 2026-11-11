@@ -22,6 +22,7 @@ pub(super) mod keys {
     pub(in crate::prefs) const INCLUDE_PRESSURE: &str = "Simulation.IncludePressure";
     pub(in crate::prefs) const UNDO_HISTORY_LIMIT: &str = "Simulation.UndoHistoryLimit";
     pub(in crate::prefs) const PRETTY_POWDER: &str = "Simulation.PrettyPowder";
+    pub(in crate::prefs) const ENABLE_MOD_ELEMENTS: &str = "Simulation.EnableModElements";
     pub(in crate::prefs) const HEAT_SIMULATION: &str = "Simulation.HeatSimulation";
     pub(in crate::prefs) const WATER_EQUALISATION: &str = "Simulation.WaterEqualisation";
     pub(in crate::prefs) const AIR_MODE: &str = "Simulation.AirMode";
@@ -87,6 +88,7 @@ impl Default for Prefs {
             include_pressure: true,
             undo_history_limit: DEFAULT_UNDO_HISTORY_LIMIT,
             pretty_powder: false,
+            mod_elements_enabled: true,
             heat_enable: true,
             water_equal_test: false,
             air_mode: AirMode::On as u32,

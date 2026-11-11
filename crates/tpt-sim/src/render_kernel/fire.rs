@@ -21,9 +21,10 @@ use super::framebuffer::{
     add_fire_px, clampf, clampi, fb_blue, fb_green, fb_red, heat_temp_colour, pack_argb, pack_rgb,
 };
 use super::particles::{
-    base_rgb, bizr_graphics, collapse_deco, deco_visible, embr_graphics, exot_flicker,
-    exot_graphics, grav_graphics, particle_rgb, pipe_cargo, pipe_pixel_mode, rock_graphics,
-    tron_graphics, tung_fire, vibr_graphics, wavelength_rgb,
+    acty_fire, base_rgb, bflm_fire, bizr_graphics, chlr_fire, clud_fire, collapse_deco, copr_fire,
+    deco_visible, dfom_fire, embr_graphics, exot_flicker, exot_graphics, grav_graphics, led_fire,
+    particle_rgb, phos_fire, pipe_cargo, pipe_pixel_mode, ppti_fire, ppto_fire, radn_fire,
+    rock_graphics, sun_fire, timc_fire, tron_graphics, tung_fire, vibr_graphics, wavelength_rgb,
 };
 use super::*;
 
@@ -46,6 +47,12 @@ const TRON_DEATH: i32 = 0x0000_0010;
 /// (`TUNG.cpp:131-142`), `VRSG` (`VRSG.cpp:60-63`), `BIZR`/`BIZRG`/`BIZRS`
 /// (`BIZR.cpp:110-120`) and `C5` (`C5.cpp:117-135`); `DEUT` and `PIPE` override
 /// only the alpha or the whole word from the table.
+///
+/// The mod's own emitters (`elements_modext.rs`) follow the same rule: `ACTY`,
+/// `BFLM`, `CHLR`, `CLUD`, `COPR`, `DFOM`, `LED`, `PHOS`, `PPTI`, `PPTO`,
+/// `RADN`, `SUN` and `TIMC`. Their table `fire_colour` is zero, so an arm
+/// decides the whole quadruple; `MGNT`, `GRPH` and the other mod elements never
+/// write a fire channel and keep the zeroed table entry.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fire_rgba(
@@ -82,6 +89,7 @@ pub(crate) fn fire_rgba(
 
     let (mut eval_ty, eval_temp, mut eval_life, mut eval_ctype) = (ty, temp, life, ctype);
     let (mut eval_tmp, mut eval_tmp2, mut eval_vx, mut eval_vy) = (tmp, tmp2, vx, vy);
+    let (mut eval_tmp3, mut eval_tmp4) = (tmp3, tmp4);
     let (mut eval_colour, mut eval_props) = (colour, props);
 
     // PIPE.cpp:340-392, 421-448: a loaded pipe emits the cargo's fire channels
@@ -101,6 +109,8 @@ pub(crate) fn fire_rgba(
             eval_tmp = tmp3;
             eval_ctype = tmp4 as u32;
             eval_tmp2 = 0i32;
+            eval_tmp3 = 0i32;
+            eval_tmp4 = 0i32;
             eval_colour = elem_props[(slot + ELEM_COLOUR) as usize];
             eval_props = elem_props[(slot + ELEM_PROPS) as usize];
             if (eval_props & 0x0000_0008u32) == 0u32 {
@@ -290,6 +300,111 @@ pub(crate) fn fire_rgba(
         r = 0u32;
         g = 0u32;
         b = 255u32;
+    } else if eval_ty == PT_ACTY {
+        // ACTY.cpp:111-127: burning acetylene emits the violet-blue fire whose
+        // alpha is the stored `tmp2`; unburnt acetylene a dim pale cyan.
+        let (fa, fr, fg, fb) = acty_fire(eval_tmp, eval_tmp2);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_BFLM {
+        // BFLM.cpp:82-99: alpha 200, blue-white fire while burning and the red
+        // one from the `tmp > 0` branch.
+        let (fa, fr, fg, fb) = bflm_fire(eval_tmp);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_CHLR {
+        // CHLR.cpp:163-181: chlorine's green fire, its alpha scaled by `tmp`
+        // when the can is charged.
+        let (fa, fr, fg, fb) = chlr_fire(eval_tmp);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_CLUD {
+        // CLUD.cpp:94-113: an about-to-rain cloud flashes a fixed fire, every
+        // other cloud emits a white fire that fades with `tmp` at a rolled
+        // alpha (`gfctx.rng.between(0, 15)`).
+        let (fa, fr, fg, fb) = clud_fire(eval_tmp, pid, tick);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_COPR {
+        // COPR.cpp:127-140: a copper particle that has burnt emits at alpha 30,
+        // blue below 173.15 K and yellow above it.
+        let (fa, fr, fg, fb) = copr_fire(eval_temp, eval_life);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_DFOM {
+        // DFOM.cpp:130-147: a deshaping foam emits a rolled hue at alpha 250,
+        // every other state the fixed grey at alpha 30.
+        let (fa, fr, fg, fb) = dfom_fire(eval_tmp4, pid, tick);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_LED {
+        // LED.cpp:86-90: a lit diode emits its `dcolour` at an alpha of its own
+        // temperature above freezing.
+        let (fa, fr, fg, fb) = led_fire(dcolour, eval_temp, eval_life);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_PHOS {
+        // PHOS.cpp:135-143: a charged phosphorus particle emits its own pixel
+        // colour (the `PHOS::graphics` result) at alpha 55.
+        let base = base_rgb(eval_colour, eval_props, pid, pretty_powder);
+        let (fa, fr, fg, fb) = phos_fire(base, eval_tmp, eval_tmp3);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_PPTI {
+        // PPTI.cpp:178-192: red at alpha 20 while empty, it stops emitting once
+        // a particle is stored.
+        let (fa, fr, fg, fb) = ppti_fire(eval_tmp2);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_PPTO {
+        // PPTO.cpp:207-221: blue at alpha 20 while empty, it stops emitting once
+        // a particle is stored.
+        let (fa, fr, fg, fb) = ppto_fire(eval_tmp2);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_RADN {
+        // RADN.cpp:129-144: an excited atom emits a warm glow, a settled one a
+        // dim blue.
+        let (fa, fr, fg, fb) = radn_fire(eval_tmp2);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_SUN {
+        // SUN.cpp:95-111: an orange glow below `tmp = 50`, a blue one above it,
+        // both at alpha 60.
+        let (fa, fr, fg, fb) = sun_fire(eval_tmp);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
+    } else if eval_ty == PT_TIMC {
+        // TIMC.cpp:96-102: a slow clock emits a green glow at alpha 30.
+        let (fa, fr, fg, fb) = timc_fire(eval_tmp2);
+        a = fa;
+        r = fr;
+        g = fg;
+        b = fb;
     }
 
     if (colour_mode & COLOUR_HEAT) != 0u32 {

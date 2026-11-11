@@ -32,6 +32,15 @@ pub fn air_copy_back_kernel(src_heat: &[f32], dst_heat: &mut [f32], cells: u32) 
 /// `bmap_blockair` is `1` for `WL_WALL`, `WL_WALLELEC`, `WL_BLOCKAIR` and an
 /// unpowered `WL_EWALL`; `bmap_blockairh` is `0x8` for those plus `WL_GRAV`.
 ///
+/// The element-driven half of the reference happens too late for this rebuild:
+/// `WALL.cpp:50-51` stamps `1` / `0x8` into the masks from the element
+/// `Update`, one frame after the rebuild that precedes it. `elem_block_air` /
+/// `elem_block_airh` carry those stamps (the modext pass clears and refills
+/// them every tick) and are OR-ed in here, which puts a wall's block exactly
+/// one frame behind the wall itself, the same latency the reference's ordering
+/// produces. Every element update that stamps the same grids (`RUBR.cpp:76-77`,
+/// `ALUM.cpp:141-142`) is folded identically.
+///
 /// The heat mask is a three-bit saturating counter in TPT: the wall loop resets
 /// it to `0`/`0x8` every frame, then `TransitionPhase` increments it for every
 /// particle that fails the conduction gate (`Simulation.cpp:2770-2776`) and only
@@ -44,6 +53,8 @@ pub fn air_block_masks_kernel(
     wall_emap: &mut [u32],
     block_air: &mut [u32],
     block_airh: &mut [u32],
+    elem_block_air: &[u32],
+    elem_block_airh: &[u32],
     cells: u32,
 ) {
     let idx = ABSOLUTE_POS;
@@ -68,13 +79,16 @@ pub fn air_block_masks_kernel(
         {
             blocked = 1u32;
         }
-        block_air[idx] = blocked;
+        // `WALL.cpp:50-51` (and the other stamping elements) assign `1` / `0x8`
+        // into the mask cells themselves; folding the element grid with `|`
+        // merges every stamp of the cell without disturbing the wall bits.
+        block_air[idx] = blocked | elem_block_air[idx];
 
         let mut heat = 0u32;
         if blocked != 0u32 || wall == WL_GRAV_U32 {
             heat = 0x8u32;
         }
-        block_airh[idx] = heat;
+        block_airh[idx] = heat | elem_block_airh[idx];
     }
 }
 

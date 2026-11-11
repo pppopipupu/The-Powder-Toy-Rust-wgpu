@@ -19,7 +19,7 @@ const PT_NUM_U32: u32 = PT_NUM as u32;
 const FLAG_RIGID_PIXEL_U32: u32 = FLAG_RIGID_PIXEL;
 const FLAG_SKIPMOVE_U32: u32 = FLAG_SKIPMOVE;
 
-const _: () = assert!(PT_NUM == 200);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 const _: () = assert!(TYPE_LIQUID == 2);
 const _: () = assert!(FLAG_RIGID_PIXEL == 0x10);
 const _: () = assert!(FLAG_SKIPMOVE == 0x02);
