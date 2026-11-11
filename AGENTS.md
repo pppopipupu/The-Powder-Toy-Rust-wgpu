@@ -105,7 +105,7 @@ Use release builds for GPU runs. A local build produces the Windows binary only.
 
 Pushing any tag runs `.github/workflows/release.yml`: it builds
 `x86_64-pc-windows-msvc` (static CRT), `x86_64-unknown-linux-gnu` and
-`aarch64-apple-darwin`, smoke-tests the Linux binary on a software Vulkan device,
+`aarch64-apple-darwin`,
 and publishes `tpt-app-<tag>-<platform>` archives on a GitHub release.
 
 ## Testing

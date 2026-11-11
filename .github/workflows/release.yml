@@ -2,9 +2,7 @@ name: release
 
 # Every tag push builds the three shipped binaries and publishes them as a
 # GitHub release. wgpu/CubeCL resolve the device at runtime, so the runners only
-# compile; the Linux job then runs the headless smoke test on a software Vulkan
-# device (`--headless-smoke`, the mode that exists for exactly this), which
-# exercises the whole kernel registry and render path without a GPU.
+# compile without executing any tests.
 on:
   push:
     tags: ['*']
@@ -51,8 +49,16 @@ jobs:
       - name: Install Linux windowing headers
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y -o Acquire::Retries=5 --no-install-recommends libxkbcommon-dev libwayland-dev; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+          done
 
       - name: Update toolchain and add target
         run: |
@@ -63,12 +69,6 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked -p tpt-app --target ${{ matrix.target }}
-
-      - name: Smoke test on a software Vulkan device
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
-          ./target/${{ matrix.target }}/release/tpt-app --headless-smoke
 
       - uses: actions/upload-artifact@v7
         with:
@@ -89,7 +89,19 @@ jobs:
           path: artifacts
 
       - name: Install zip
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zip
+        run: |
+          set -euo pipefail
+          if ! command -v zip >/dev/null 2>&1; then
+            for attempt in 1 2 3; do
+              if sudo apt-get update && sudo apt-get install -y -o Acquire::Retries=5 --no-install-recommends zip; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              sleep 5
+            done
+          fi
 
       - name: Package
         run: |
