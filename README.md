@@ -6,6 +6,10 @@ English | [简体中文](README_ZH.md)
 
 A GPU-accelerated Rust port of *The Powder Toy*. Simulation passes and fancy rendering execute as CubeCL compute kernels on `wgpu`, paired with a `winit` and `egui-wgpu` desktop front end.
 
+| 2D Simulation | 3D Voxel Sandbox |
+| :---: | :---: |
+| ![2D Simulation](doc/2d.png) | ![3D Voxel Sandbox](doc/3d.png) |
+
 ## Overview
 
 - **Device-resident GPU pipeline**: Eulerian air/ambient heat, thermal conduction, phase/pressure transitions, element reactions, lock-free particle movement, Game of Life (`LIFE`), FFT Newtonian gravity, water equalisation, and fancy display rendering run on a single shared `wgpu::Device`/`Queue`, blitted straight into an `egui` texture without per-frame CPU/GPU round-trips.
