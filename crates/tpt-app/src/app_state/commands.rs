@@ -718,6 +718,18 @@ impl AppState {
         }
     }
 
+    /// Next wall-clock instant at which [`Self::tick_frame`] should advance
+    /// the simulation, or `None` when uncapped, paused with no held tool, or
+    /// on the title screen.
+    pub fn next_sim_tick_due(&self) -> Option<Instant> {
+        if self.screen != AppScreen::InGame || (self.is_paused() && self.held_sim_tool.is_none()) {
+            return None;
+        }
+        let interval = FpsLimit::from_cap_value(self.engine.fps_cap).interval_secs()?;
+        let remaining = (interval - self.sim_step_debt).max(0.0);
+        Some(self.last_sim_step_instant + std::time::Duration::from_secs_f32(remaining))
+    }
+
     /// Copies the persisted caps into the engine mirror Lua reads.
     fn seed_engine_caps(&mut self) {
         self.engine.fps_cap = self.prefs.fps_limit.to_cap_value();

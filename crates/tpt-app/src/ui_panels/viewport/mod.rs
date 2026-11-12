@@ -464,7 +464,9 @@ pub(super) fn draw_viewport(ui: &mut Ui, state: &mut AppState, sim_tex_id: Textu
     if response.middle_clicked()
         && let Some((x, y)) = sim_pos
     {
-        if let Some(particle) = state.particle_at(x, y) {
+        // A click samples the pixel the device holds now, not the HUD's cached
+        // neighbour from up to 40 ms ago.
+        if let Some(particle) = state.particle_at_now(x, y) {
             state.primary_tool = SelectedTool::Element(particle.ty);
         } else if let Some(wall) = state.wall_at(x, y)
             && wall != WL_ERASE

@@ -3,64 +3,31 @@
 //! `PowderToyApp::redraw` owns the frame sequence; the device-side stages live
 //! here so the application handler stays about window/event bookkeeping.
 
-use std::time::Instant;
-
 use winit::window::Window;
 
 use crate::app_state::{AppScreen, AppState, GameMode};
 use crate::gpu_ctx::GpuContext;
 use crate::render3d::RigidRenderBuffers;
 
-/// Advances and renders the simulation, honouring the render framerate cap.
-///
-/// The cap is hard-locked at 240 fps (`prefs::MAX_SANE_DRAW_FPS`) by
-/// `prefs::draw_interval_secs`: rendering and presenting are skipped until the
-/// interval has elapsed, so the present rate never exceeds 240 regardless of
-/// the preference. The simulation itself keeps stepping on its own cap.
-///
-/// Returns `false` when the frame was skipped; the caller must then return
-/// without building or presenting a frame (a redraw is already requested).
-pub(super) fn render_simulation(
-    window: &Window,
-    state: &mut AppState,
-    last_present: &mut Instant,
-) -> bool {
+/// Renders the 2D powder simulation framebuffer on the GPU after UI input has
+/// been applied for this frame.
+pub(super) fn render_simulation_frame(state: &mut AppState) {
     if state.screen != AppScreen::InGame {
-        // The title screen is drawn at the same cap as the game, so the pacer
-        // in `about_to_wait` has a deadline to wait for.
-        *last_present = Instant::now();
-        return true;
+        return;
     }
-
-    state.tick_frame();
-
-    let draw_due = last_present.elapsed().as_secs_f32()
-        >= crate::prefs::draw_interval_secs(state.draw_fps()) * 0.98;
-    if !draw_due {
-        window.request_redraw();
-        return false;
-    }
-    *last_present = Instant::now();
-    state.sample_presented_frame();
-    // The 3D path renders through `Renderer3d` in `present_frame`; the 2D
-    // software/GPU powder renderer must never run while the sandbox is active.
     if state.mode == GameMode::Powder2D {
+        state.engine.flush_host_edits();
         state.engine.render_gpu();
     }
-    true
 }
 
 /// Reallocates the simulation texture when the UI changed the canvas size.
 ///
-/// The fresh texture is blank, so the current simulation is rendered and
-/// blitted into it straight away. If the GPU blit cannot be encoded, the
-/// update is skipped (the fresh texture stays blank for this frame) and a
-/// redraw is requested so the next `present_frame` retries the blit; the
-/// framebuffer is never read back to the host on this path.
+/// The caller renders and blits the simulation framebuffer immediately
+/// afterwards during [`present_frame`], so no host read-back is needed here.
 pub(super) fn resize_sim_texture(
-    window: &Window,
     gpu: &mut GpuContext,
-    state: &mut AppState,
+    state: &AppState,
     requested: Option<(u32, u32)>,
 ) {
     // The 3D viewport never reports a simulation resize, and resizing the
@@ -77,25 +44,6 @@ pub(super) fn resize_sim_texture(
     }
 
     gpu.resize_sim_texture(width, height);
-    if state.screen != AppScreen::InGame {
-        return;
-    }
-
-    state.engine.render_gpu();
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("tpt-sim-resize-blit"),
-        });
-    let blitted = gpu.encode_sim_blit(&mut encoder, &state.engine.bufs);
-    gpu.queue.submit(Some(encoder.finish()));
-    if !blitted {
-        // Never read the framebuffer back to the host here: that is a
-        // full-canvas GPU->CPU->GPU round-trip on the interactive path. The
-        // freshly allocated texture keeps its blank contents for this frame
-        // and the next `present_frame` retries the blit.
-        window.request_redraw();
-    }
 }
 
 /// Creates the 3D renderer on first use and matches the texture to its target.

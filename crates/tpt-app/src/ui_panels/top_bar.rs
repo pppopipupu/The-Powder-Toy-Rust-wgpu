@@ -239,7 +239,10 @@ fn draw_telemetry(ui: &mut Ui, state: &AppState) {
     );
     ui.separator();
     if (state.engine.bufs.config.colour_mode & tpt_core::constants::COLOUR_HEAT) != 0 {
-        let (hmin, hmax) = state.resolve_heat_display_limits();
+        // `GameView.cpp:2563-2569` prints `rendererStats.hdispLimitMin/Max`,
+        // the pair the renderer resolved for this frame. The old host-side scan
+        // walked every used particle slot on the main thread on each frame.
+        let (hmin, hmax, _) = tpt_sim::render_kernel::current_hdisp_limits();
         ui.label(
             RichText::new(t_fmt(
                 "top_bar.temp_range",

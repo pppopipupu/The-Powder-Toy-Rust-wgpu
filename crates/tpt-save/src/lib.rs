@@ -28,7 +28,7 @@ pub mod voxel3d;
 
 use std::io::{Read, Write};
 use std::path::Path;
-
+use std::sync::{Arc, LazyLock, Mutex, Weak, mpsc};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -187,14 +187,15 @@ impl SaveData {
         if engine.bufs.host_dirty {
             engine.bufs.sync_host_to_gpu();
         }
-        engine.bufs.sync_gpu_to_host();
+        engine.bufs.ensure_host_current();
         // Rigid-body poses are device-resident; pull them before the snapshot
         // so a saved/undone pose is exactly the frame the user sees.
         engine.sync_rigid_bodies_to_host();
 
         let bufs = &engine.bufs;
         let mut particles = Vec::new();
-        for id in 0..bufs.part_ty.len() {
+        let scan = bufs.used_slot_bound().min(bufs.part_ty.len());
+        for id in 0..scan {
             // `ty == 0` marks a free slot in the pool; only live particles are
             // persisted so that save files stay compact.
             if bufs.part_ty[id] != 0 {
@@ -446,17 +447,97 @@ impl SaveData {
     }
 }
 
-/// Bounded undo / redo history holding compressed [`SaveData`] snapshots.
+/// Payload stored inside one undo/redo stack entry.
+///
+/// New snapshots start uncompressed so capturing on mouse-down does not stall
+/// the UI thread with synchronous zlib compression on large canvases, and a
+/// background worker replaces the raw snapshot with its compressed `.tptrs`
+/// payload while freeing the uncompressed buffers.
+#[derive(Debug)]
+enum UndoPayload {
+    Raw(Arc<SaveData>),
+    Compressed(Vec<u8>),
+}
+
+/// One undo/redo snapshot entry, compressed asynchronously off the UI thread.
+#[derive(Clone, Debug)]
+pub struct UndoSnapshot(Arc<Mutex<UndoPayload>>);
+
+impl From<Vec<u8>> for UndoSnapshot {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(Arc::new(Mutex::new(UndoPayload::Compressed(bytes))))
+    }
+}
+
+impl PartialEq for UndoSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+static UNDO_COMPRESS_TX: LazyLock<mpsc::Sender<Weak<Mutex<UndoPayload>>>> = LazyLock::new(|| {
+    let (tx, rx) = mpsc::channel::<Weak<Mutex<UndoPayload>>>();
+    let _ = std::thread::Builder::new()
+        .name("tpt-undo-compress".to_string())
+        .spawn(move || {
+            while let Ok(weak) = rx.recv() {
+                let Some(arc) = weak.upgrade() else {
+                    continue;
+                };
+                let raw = {
+                    let Ok(guard) = arc.lock() else {
+                        continue;
+                    };
+                    match &*guard {
+                        UndoPayload::Raw(data) => Some(data.clone()),
+                        UndoPayload::Compressed(_) => None,
+                    }
+                };
+                let Some(raw) = raw else {
+                    continue;
+                };
+                if let Ok(bytes) = raw.to_bytes()
+                    && let Ok(mut guard) = arc.lock()
+                    && matches!(&*guard, UndoPayload::Raw(_))
+                {
+                    *guard = UndoPayload::Compressed(bytes);
+                }
+            }
+        });
+    tx
+});
+
+impl UndoSnapshot {
+    fn from_save_data(data: SaveData) -> Self {
+        let arc = Arc::new(Mutex::new(UndoPayload::Raw(Arc::new(data))));
+        let _ = UNDO_COMPRESS_TX.send(Arc::downgrade(&arc));
+        Self(arc)
+    }
+
+
+    fn decode(&self) -> Result<SaveData, String> {
+        let payload = {
+            let guard = self.0.lock().map_err(|_| "undo snapshot lock poisoned".to_string())?;
+            match &*guard {
+                UndoPayload::Raw(data) => return Ok((**data).clone()),
+                UndoPayload::Compressed(bytes) => bytes.clone(),
+            }
+        };
+        SaveData::from_bytes(&payload)
+    }
+}
+
+/// Bounded undo / redo history holding [`SaveData`] snapshots.
 ///
 /// `undo_stack` holds earlier states (most recent last) and `redo_stack` holds
 /// states that were undone, so `undo`/`redo` behave like a classic linear
 /// history: a fresh [`UndoHistory::push_snapshot`] discards the redo branch.
 #[derive(Clone, Debug)]
 pub struct UndoHistory {
-    /// Compressed snapshots of past states; the last entry is the most recent.
-    pub undo_stack: Vec<Vec<u8>>,
-    /// Compressed snapshots of undone states; the last entry is the most recent.
-    pub redo_stack: Vec<Vec<u8>>,
+    /// Snapshots of past states; the last entry is the most recent.
+    pub undo_stack: Vec<UndoSnapshot>,
+    /// Snapshots of undone states; the last entry is the most recent.
+    pub redo_stack: Vec<UndoSnapshot>,
     /// Upper bound on the number of snapshots kept in each stack.
     pub max_snapshots: usize,
 }
@@ -475,14 +556,11 @@ impl UndoHistory {
 
     /// Records the current engine state as an undo point and clears redo.
     pub fn push_snapshot(&mut self, engine: &mut SimulationEngine) {
-        let snapshot = match SaveData::capture_from(engine).to_bytes() {
-            Ok(bytes) => bytes,
-            Err(_) => return,
-        };
-        self.push_snapshot_bytes(snapshot);
+        let snapshot = UndoSnapshot::from_save_data(SaveData::capture_from(engine));
+        self.push_snapshot_entry(snapshot);
     }
 
-    fn push_snapshot_bytes(&mut self, snapshot: Vec<u8>) {
+    fn push_snapshot_entry(&mut self, snapshot: UndoSnapshot) {
         self.redo_stack.clear();
         self.undo_stack.push(snapshot);
         self.trim_undo();
@@ -493,7 +571,7 @@ impl UndoHistory {
         let Some(snapshot) = self.undo_stack.pop() else {
             return false;
         };
-        let data = match SaveData::from_bytes(&snapshot) {
+        let data = match snapshot.decode() {
             Ok(data) => data,
             Err(_) => {
                 // Keep the stack consistent if the payload is corrupt.
@@ -512,7 +590,7 @@ impl UndoHistory {
         let Some(snapshot) = self.redo_stack.pop() else {
             return false;
         };
-        let data = match SaveData::from_bytes(&snapshot) {
+        let data = match snapshot.decode() {
             Ok(data) => data,
             Err(_) => {
                 self.redo_stack.push(snapshot);
@@ -526,17 +604,15 @@ impl UndoHistory {
     }
 
     fn push_redo(&mut self, engine: &mut SimulationEngine) {
-        if let Ok(bytes) = SaveData::capture_from(engine).to_bytes() {
-            self.redo_stack.push(bytes);
-            self.trim_redo();
-        }
+        self.redo_stack
+            .push(UndoSnapshot::from_save_data(SaveData::capture_from(engine)));
+        self.trim_redo();
     }
 
     fn push_undo(&mut self, engine: &mut SimulationEngine) {
-        if let Ok(bytes) = SaveData::capture_from(engine).to_bytes() {
-            self.undo_stack.push(bytes);
-            self.trim_undo();
-        }
+        self.undo_stack
+            .push(UndoSnapshot::from_save_data(SaveData::capture_from(engine)));
+        self.trim_undo();
     }
 
     /// Whether [`UndoHistory::undo`] would restore a state.
@@ -784,12 +860,15 @@ mod tests {
     fn undo_history_bounds_stacks() {
         // Pure data-structure behaviour: no engine required for trimming.
         let mut history = UndoHistory::new(2);
-        history.undo_stack.push(vec![1]);
-        history.undo_stack.push(vec![2]);
-        history.undo_stack.push(vec![3]);
+        let s1 = UndoSnapshot::from(vec![1]);
+        let s2 = UndoSnapshot::from(vec![2]);
+        let s3 = UndoSnapshot::from(vec![3]);
+        history.undo_stack.push(s1);
+        history.undo_stack.push(s2.clone());
+        history.undo_stack.push(s3);
         history.trim_undo();
         assert_eq!(history.undo_stack.len(), 2);
-        assert_eq!(history.undo_stack[0], vec![2]);
+        assert_eq!(history.undo_stack[0], s2);
         assert!(history.can_undo());
         history.clear();
         assert!(!history.can_undo());

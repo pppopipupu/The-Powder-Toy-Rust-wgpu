@@ -87,25 +87,6 @@ pub fn generate_brush_points(
     points
 }
 
-/// Appends `p` to `points` unless it was already produced by an earlier stamp.
-///
-/// `seen` is `None` for single-pixel brushes, where a Bresenham line is already
-/// duplicate-free and the hash bookkeeping would be pure overhead.
-fn push_unique(
-    points: &mut Vec<(i32, i32)>,
-    seen: &mut Option<HashSet<(i32, i32)>>,
-    p: (i32, i32),
-) {
-    match seen {
-        Some(seen) => {
-            if seen.insert(p) {
-                points.push(p);
-            }
-        }
-        None => points.push(p),
-    }
-}
-
 /// Stamps the brush along a Bresenham line from `(x0, y0)` to `(x1, y1)`.
 ///
 /// Consecutive stamps overlap heavily, so each pixel is emitted exactly once, in
@@ -120,15 +101,10 @@ pub fn generate_line_points(
     ry: i32,
     shape: BrushShape,
 ) -> Vec<(i32, i32)> {
-    let rx = rx.saturating_abs();
-    let ry = ry.saturating_abs();
+    let rx = rx.saturating_abs().min(MAX_BRUSH_RADIUS);
+    let ry = ry.saturating_abs().min(MAX_BRUSH_RADIUS);
 
     let mut points = Vec::new();
-    let mut seen = if rx == 0 && ry == 0 {
-        None
-    } else {
-        Some(HashSet::new())
-    };
 
     // 64-bit error terms: no overflow for any i32 endpoint pair.
     let mut x = x0 as i64;
@@ -142,17 +118,91 @@ pub fn generate_line_points(
     let step_y = if y < target_y { 1 } else { -1 };
     let mut err = dx + dy;
 
-    loop {
-        for p in generate_brush_points(x as i32, y as i32, rx, ry, shape) {
-            push_unique(&mut points, &mut seen, p);
+    if rx == 0 && ry == 0 {
+        let steps = (dx.max(-dy) + 1).min(4_000_000) as usize;
+        points.reserve(steps);
+        loop {
+            points.push((x as i32, y as i32));
+            if x == target_x && y == target_y {
+                break;
+            }
+            let err2 = 2 * err;
+            if err2 >= dy {
+                err += dy;
+                x += step_x;
+            }
+            if err2 <= dx {
+                err += dx;
+                y += step_y;
+            }
         }
+        return points;
+    }
 
+    // Compute the brush stamp once around `(0, 0)` and translate it along the
+    // Bresenham line instead of re-evaluating the shape inequalities and
+    // allocating a fresh `Vec` on every step.
+    let offsets = generate_brush_points(0, 0, rx, ry, shape);
+    let min_x = x0.min(x1) as i64 - rx as i64;
+    let max_x = x0.max(x1) as i64 + rx as i64;
+    let min_y = y0.min(y1) as i64 - ry as i64;
+    let max_y = y0.max(y1) as i64 + ry as i64;
+    let width = (max_x - min_x + 1) as u64;
+    let height = (max_y - min_y + 1) as u64;
+    let area = width.saturating_mul(height);
+
+    // Use a flat bitset for normal canvas strokes (<= 2 MiB for up to 16 Mpx)
+    // instead of millions of SipHash `HashSet` inserts on the UI thread.
+    const MAX_BITSET_AREA: u64 = 16_777_216;
+    if area <= MAX_BITSET_AREA {
+        let width_usize = width as usize;
+        let mut seen = vec![0u64; (area as usize).div_ceil(64)];
+        points.reserve((area as usize).min(offsets.len().saturating_mul(4)));
+
+        loop {
+            let cx = x as i32;
+            let cy = y as i32;
+            for &(ox, oy) in &offsets {
+                let px = cx + ox;
+                let py = cy + oy;
+                let bit = (py as i64 - min_y) as usize * width_usize + (px as i64 - min_x) as usize;
+                let word = &mut seen[bit >> 6];
+                let mask = 1u64 << (bit & 63);
+                if (*word & mask) == 0 {
+                    *word |= mask;
+                    points.push((px, py));
+                }
+            }
+
+            if x == target_x && y == target_y {
+                break;
+            }
+            let err2 = 2 * err;
+            if err2 >= dy {
+                err += dy;
+                x += step_x;
+            }
+            if err2 <= dx {
+                err += dx;
+                y += step_y;
+            }
+        }
+        return points;
+    }
+
+    let mut seen = HashSet::with_capacity(offsets.len().saturating_mul(2));
+    loop {
+        let cx = x as i32;
+        let cy = y as i32;
+        for &(ox, oy) in &offsets {
+            let p = (cx + ox, cy + oy);
+            if seen.insert(p) {
+                points.push(p);
+            }
+        }
         if x == target_x && y == target_y {
             break;
         }
-
-        // Classic integer Bresenham: the doubled error decides whether this
-        // step advances on the x axis, the y axis, or both (diagonal).
         let err2 = 2 * err;
         if err2 >= dy {
             err += dy;
@@ -163,7 +213,6 @@ pub fn generate_line_points(
             y += step_y;
         }
     }
-
     points
 }
 
@@ -243,17 +292,51 @@ pub fn adjust_brush_size(rx: &mut i32, ry: &mut i32, delta: i32, lock_x: bool, l
 /// engine only needs each block once. Negative coordinates floor correctly
 /// (`div_euclid`); out-of-range blocks are clipped by the engine.
 fn wall_cells_from_points(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    if points.is_empty() {
+        return Vec::new();
+    }
     let cell = CELL as i32;
-    let mut cells = Vec::with_capacity(points.len());
-    let mut seen = HashSet::with_capacity(points.len());
+    let mut min_cx = i32::MAX;
+    let mut max_cx = i32::MIN;
+    let mut min_cy = i32::MAX;
+    let mut max_cy = i32::MIN;
+    for &(x, y) in points {
+        let cx = x.div_euclid(cell);
+        let cy = y.div_euclid(cell);
+        min_cx = min_cx.min(cx);
+        max_cx = max_cx.max(cx);
+        min_cy = min_cy.min(cy);
+        max_cy = max_cy.max(cy);
+    }
+    let width = (max_cx as i64 - min_cx as i64 + 1) as u64;
+    let height = (max_cy as i64 - min_cy as i64 + 1) as u64;
+    let area = width.saturating_mul(height);
+    if area <= 1_048_576 {
+        let width_usize = width as usize;
+        let mut seen = vec![0u64; (area as usize).div_ceil(64)];
+        let mut cells = Vec::with_capacity((points.len() / 8).max(16));
+        for &(x, y) in points {
+            let cx = x.div_euclid(cell);
+            let cy = y.div_euclid(cell);
+            let bit = (cy - min_cy) as usize * width_usize + (cx - min_cx) as usize;
+            let word = &mut seen[bit >> 6];
+            let mask = 1u64 << (bit & 63);
+            if (*word & mask) == 0 {
+                *word |= mask;
+                cells.push((cx, cy));
+            }
+        }
+        return cells;
+    }
 
+    let mut cells = Vec::with_capacity((points.len() / 16).max(16));
+    let mut seen = HashSet::with_capacity((points.len() / 16).max(16));
     for &(x, y) in points {
         let block = (x.div_euclid(cell), y.div_euclid(cell));
         if seen.insert(block) {
             cells.push(block);
         }
     }
-
     cells
 }
 
@@ -574,7 +657,15 @@ pub fn apply_tool_stroke(
             // cursor. It always targets the primary brush, like the reference
             // `SetActiveTool(0, ...)`, and never mutates the simulation.
             let (x, y) = p1;
-            if let Some(particle) = state.particle_at(x, y) {
+            // The press and a click sample the pixel under the cursor exactly;
+            // a drag frame reuses the throttled HUD probe so sampling does not
+            // turn into one device sync per frame.
+            let particle = if p0 == p1 {
+                state.particle_at_now(x, y)
+            } else {
+                state.particle_at(x, y)
+            };
+            if let Some(particle) = particle {
                 state.primary_tool = SelectedTool::Element(particle.ty);
                 state.prefs.spawn_element = particle.ty;
             } else if let Some(sample) = state.wall_sample_at(x, y) {
@@ -712,6 +803,46 @@ mod tests {
         assert_eq!(unique.len(), points.len());
         // Five columns (-1..=3) times three rows (-1..=1).
         assert_eq!(points.len(), 15);
+    }
+
+    #[test]
+    fn thick_diagonal_line_matches_stamp_union_and_order() {
+        for shape in [BrushShape::Circle, BrushShape::Square, BrushShape::Triangle] {
+            let got = generate_line_points(-12, 8, 25, -14, 17, 11, shape);
+            let mut expected = Vec::new();
+            let mut seen = HashSet::new();
+            let (mut x, mut y) = (-12i32, 8i32);
+            let (tx, ty) = (25i32, -14i32);
+            let dx = (tx - x).abs();
+            let dy = -(ty - y).abs();
+            let sx = if x < tx { 1 } else { -1 };
+            let sy = if y < ty { 1 } else { -1 };
+            let mut err = dx + dy;
+            loop {
+                for p in generate_brush_points(x, y, 17, 11, shape) {
+                    if seen.insert(p) {
+                        expected.push(p);
+                    }
+                }
+                if x == tx && y == ty {
+                    break;
+                }
+                let err2 = 2 * err;
+                if err2 >= dy {
+                    err += dy;
+                    x += sx;
+                }
+                if err2 <= dx {
+                    err += dx;
+                    y += sy;
+                }
+            }
+            assert_eq!(got, expected, "line mismatch for shape {shape:?}");
+
+            let cells = wall_cells_from_points(&got);
+            let unique_cells: HashSet<(i32, i32)> = cells.iter().copied().collect();
+            assert_eq!(cells.len(), unique_cells.len());
+        }
     }
 
     #[test]

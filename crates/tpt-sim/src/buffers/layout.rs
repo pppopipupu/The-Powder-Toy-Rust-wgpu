@@ -229,6 +229,7 @@ impl SimBuffers {
             spawn_defaults_host: Vec::new(),
 
             rigid_bodies: Vec::new(),
+            pending_live_count: None,
             next_rigid_id: 0,
         };
 
@@ -417,6 +418,7 @@ impl SimBuffers {
         self.gpu_particles_dirty = false;
         self.gpu_maps_dirty = false;
         self.gpu_air_dirty = false;
+        self.pending_live_count = None;
         self.gpu_spawn_used = false;
     }
 
@@ -635,7 +637,9 @@ impl SimBuffers {
         self.intent_target = self.client.empty(new_capacity * WORD);
 
         self.capacity = new_capacity;
-        self.upload_particles();
+        // These are fresh device buffers: nothing but a whole-pool upload can
+        // seed them, whatever the slot list says.
+        self.upload_all_particles();
     }
 
     pub fn mark_all_dirty(&mut self) {

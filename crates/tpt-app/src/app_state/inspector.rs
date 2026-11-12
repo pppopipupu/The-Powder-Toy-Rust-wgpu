@@ -9,13 +9,20 @@ use std::time::{Duration, Instant};
 use tpt_core::constants::CELL;
 use tpt_core::particle::GpuParticle;
 use tpt_sim::buffers::PixelProbe;
+use tpt_sim::live_count::PendingRead;
 
 use crate::i18n::{t, t_fmt};
 
 use super::AppState;
 use super::property::{temperature_suffix, temperature_to_scale};
 
-/// Shortest gap between two inspector device probes while the cursor moves.
+/// Shortest gap between two inspector device probes, whatever the pointer does.
+///
+/// A probe is a blocking `Client::read` (two of them when a particle occupies
+/// the pixel), i.e. a full queue drain. The top-bar inspector asks for the
+/// pixel under the cursor on every frame, and a cursor crossing `CELL`-sized
+/// cells asks for a *different* pixel on nearly every frame: throttling only
+/// same-cell refreshes let a fast drag issue one device sync per frame.
 const INSPECTOR_PROBE_MIN_INTERVAL: Duration = Duration::from_millis(40);
 /// A probe older than this is always refreshed, even for a stationary cursor.
 const INSPECTOR_PROBE_MAX_AGE: Duration = Duration::from_millis(150);
@@ -24,9 +31,25 @@ const INSPECTOR_PROBE_MAX_AGE: Duration = Duration::from_millis(150);
 struct InspectorCache {
     x: i32,
     y: i32,
-    cell: (u32, u32),
     sampled_at: Instant,
     probe: Option<PixelProbe>,
+}
+
+struct PendingProbe {
+    x: i32,
+    y: i32,
+    handle: PendingRead<Option<PixelProbe>>,
+}
+
+/// Whether the cached probe may stand in for a request on another pixel.
+///
+/// The interval floor applies to every request, not just the same cell: the
+/// top bar asks for a new pixel as soon as the cursor crosses a `CELL` block,
+/// so a per-cell rule still allowed one blocking device read per frame while
+/// the mouse moved. A sample up to [`INSPECTOR_PROBE_MIN_INTERVAL`] old is
+/// invisible next to the 150 ms stationary refresh.
+fn probe_cache_reuse(age: Duration, same_pixel: bool) -> bool {
+    age < INSPECTOR_PROBE_MIN_INTERVAL || (same_pixel && age < INSPECTOR_PROBE_MAX_AGE)
 }
 
 // The initialiser is already a `const` block; clippy 1.99 reports it anyway.
@@ -36,19 +59,15 @@ thread_local! {
     #[allow(clippy::missing_const_for_thread_local)]
     static INSPECTOR_CACHE: RefCell<Option<InspectorCache>> =
         const { RefCell::new(None::<InspectorCache>) };
-}
-
-/// Coarse `CELL x CELL` block of pixel `(x, y)`.
-fn inspector_cell(x: i32, y: i32) -> (u32, u32) {
-    (
-        x.div_euclid(CELL as i32) as u32,
-        y.div_euclid(CELL as i32) as u32,
-    )
+    #[allow(clippy::missing_const_for_thread_local)]
+    static PENDING_PROBE: RefCell<Option<PendingProbe>> =
+        const { RefCell::new(None::<PendingProbe>) };
 }
 
 /// Drops the cached probe (canvas changed, save loaded, simulation cleared).
 pub(super) fn clear_inspector_cache() {
     INSPECTOR_CACHE.with(|cache| *cache.borrow_mut() = None);
+    PENDING_PROBE.with(|pending| *pending.borrow_mut() = None);
 }
 
 /// Wall report for the HUD inspector and the property window's sample row.
@@ -109,38 +128,96 @@ impl AppState {
     /// Returns the particle occupying the given simulation pixel, if any.
     ///
     /// The HUD runs every frame, so the device probe is cached: it refreshes at
-    /// most every 150 ms, and at most every 40 ms while the cursor crosses
-    /// cells. A blocking probe per frame stalled the render loop.
+    /// most every 40 ms, and at most every 150 ms for a stationary pixel. A
+    /// blocking probe per frame stalled the render loop.
     pub fn particle_at(&self, x: i32, y: i32) -> Option<GpuParticle> {
         self.probe_at(x, y).and_then(|probe| probe.particle)
     }
 
-    /// Cached pixel probe (particle, wall, electrical state and pressure).
+    /// Pixel probe that must match the device *now*, for click actions.
     ///
-    /// Out-of-canvas coordinates return `None` without touching the device.
-    pub fn probe_at(&self, x: i32, y: i32) -> Option<PixelProbe> {
-        let cell = inspector_cell(x, y);
+    /// The middle-click sampler, the `Sample` tool and the shift-click property
+    /// seeding all act on the pixel the player clicked, so they cannot reuse a
+    /// probe that was taken for a neighbouring pixel up to
+    /// [`INSPECTOR_PROBE_MIN_INTERVAL`] ago. Storing the fresh result keeps the
+    /// per-frame HUD cache coherent with the click.
+    pub fn probe_at_now(&self, x: i32, y: i32) -> Option<PixelProbe> {
+        let probe = self.engine.bufs.probe_pixel(x, y);
+        PENDING_PROBE.with(|pending| *pending.borrow_mut() = None);
         INSPECTOR_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if let Some(cached) = cache.as_ref() {
-                let age = cached.sampled_at.elapsed();
-                let same_pixel = cached.x == x && cached.y == y;
-                let same_cell = cached.cell == cell;
-                let reuse = age < INSPECTOR_PROBE_MAX_AGE
-                    && (same_pixel || (same_cell && age < INSPECTOR_PROBE_MIN_INTERVAL));
-                if reuse {
-                    return cached.probe.clone();
-                }
-            }
-            let probe = self.engine.bufs.probe_pixel(x, y);
-            *cache = Some(InspectorCache {
+            *cache.borrow_mut() = Some(InspectorCache {
                 x,
                 y,
-                cell,
                 sampled_at: Instant::now(),
                 probe: probe.clone(),
             });
-            probe
+        });
+        probe
+    }
+
+    /// Uncached counterpart of [`Self::particle_at`].
+    pub fn particle_at_now(&self, x: i32, y: i32) -> Option<GpuParticle> {
+        self.probe_at_now(x, y).and_then(|probe| probe.particle)
+    }
+
+    /// Cached non-blocking pixel probe (particle, wall, electrical state and
+    /// pressure).
+    ///
+    /// Refreshes asynchronously through `probe_pixel_async` so moving or
+    /// dragging across a large canvas never stalls the render loop waiting for
+    /// the GPU queue to drain. Out-of-canvas coordinates return `None` without
+    /// touching the device.
+    pub fn probe_at(&self, x: i32, y: i32) -> Option<PixelProbe> {
+        let mut completed: Option<InspectorCache> = None;
+        let mut in_flight = false;
+        PENDING_PROBE.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            if let Some(job) = pending.as_ref() {
+                if let Some(probe) = job.handle.try_take() {
+                    completed = Some(InspectorCache {
+                        x: job.x,
+                        y: job.y,
+                        sampled_at: Instant::now(),
+                        probe,
+                    });
+                    *pending = None;
+                } else if !job.handle.is_done() {
+                    in_flight = true;
+                } else {
+                    *pending = None;
+                }
+            }
+        });
+
+        INSPECTOR_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(fresh) = completed {
+                *cache = Some(fresh);
+            }
+            let needs_refresh = match cache.as_ref() {
+                Some(cached) => {
+                    !probe_cache_reuse(cached.sampled_at.elapsed(), cached.x == x && cached.y == y)
+                }
+                None => true,
+            };
+            if needs_refresh
+                && !in_flight
+                && let Some(handle) = self.engine.bufs.probe_pixel_async(x, y)
+            {
+                if let Some(probe) = handle.try_take() {
+                    *cache = Some(InspectorCache {
+                        x,
+                        y,
+                        sampled_at: Instant::now(),
+                        probe,
+                    });
+                } else {
+                    PENDING_PROBE.with(|pending| {
+                        *pending.borrow_mut() = Some(PendingProbe { x, y, handle });
+                    });
+                }
+            }
+            cache.as_ref().and_then(|cached| cached.probe.clone())
         })
     }
 
@@ -197,55 +274,27 @@ impl AppState {
             pressure: bufs.air_pv.get(cell).copied().unwrap_or(0.0),
         })
     }
+}
 
-    /// Resolves the effective heat display limits (min, max) in Kelvin.
-    /// If explicit, returns the explicit values. If "auto", calculates the min/max
-    /// of active particles inside the configured auto area.
-    pub fn resolve_heat_display_limits(&self) -> (f32, f32) {
-        let cfg = &self.engine.bufs.config;
-        let mut min = cfg.heat_display_limit_min;
-        let mut max = cfg.heat_display_limit_max;
-        if min.is_none() || max.is_none() {
-            let ax = cfg.heat_display_auto_x;
-            let ay = cfg.heat_display_auto_y;
-            let aw = cfg.heat_display_auto_w;
-            let ah = cfg.heat_display_auto_h;
-            let mut auto_min = 9999.0f32;
-            let mut auto_max = 0.0f32;
-            let mut found = false;
-            let bufs = &self.engine.bufs;
-            // Live slots are sparse, so the scan bound is the slot watermark,
-            // not the live count.
-            let active = bufs.used_slot_bound();
-            for i in 0..active.min(bufs.part_ty.len()) {
-                if bufs.part_ty[i] != 0 {
-                    let px = bufs.part_x[i] as i32;
-                    let py = bufs.part_y[i] as i32;
-                    if px >= ax && px < ax + aw && py >= ay && py < ay + ah {
-                        let temp = bufs.part_temp[i];
-                        if temp < auto_min {
-                            auto_min = temp;
-                        }
-                        if temp > auto_max {
-                            auto_max = temp;
-                        }
-                        found = true;
-                    }
-                }
-            }
-            if !found {
-                auto_min = 0.0;
-                auto_max = 9999.0;
-            }
-            if min.is_none() {
-                min = Some(auto_min);
-            }
-            if max.is_none() {
-                max = Some(auto_max);
-            }
-        }
-        let eff_min = min.unwrap_or(0.0).clamp(0.0, 9999.0);
-        let eff_max = max.unwrap_or(9999.0).clamp(0.0, 9999.0).max(eff_min + 1.0);
-        (eff_min, eff_max)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cursor crossing cells must not issue a device probe per frame: the
+    /// floor applies to a *different* pixel as well.
+    #[test]
+    fn probe_cache_throttles_a_moving_cursor() {
+        assert!(probe_cache_reuse(Duration::from_millis(1), false));
+        assert!(probe_cache_reuse(Duration::from_millis(39), false));
+        assert!(!probe_cache_reuse(Duration::from_millis(41), false));
+        assert!(!probe_cache_reuse(Duration::from_millis(149), false));
+    }
+
+    /// A stationary pixel still refreshes so the readout follows the sim.
+    #[test]
+    fn probe_cache_refreshes_a_stationary_pixel() {
+        assert!(probe_cache_reuse(Duration::from_millis(41), true));
+        assert!(probe_cache_reuse(Duration::from_millis(149), true));
+        assert!(!probe_cache_reuse(Duration::from_millis(151), true));
     }
 }

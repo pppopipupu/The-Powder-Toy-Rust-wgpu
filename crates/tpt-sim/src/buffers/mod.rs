@@ -464,6 +464,7 @@ pub struct SimBuffers {
     pub spawn_defaults_host: Vec<u32>,
 
     pub rigid_bodies: Vec<RigidBody2D>,
+    pub(crate) pending_live_count: Option<crate::live_count::PendingLiveCount>,
     pub next_rigid_id: u32,
 }
 

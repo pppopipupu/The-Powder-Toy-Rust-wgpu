@@ -26,7 +26,7 @@ mod frame;
 mod geometry;
 
 use self::frame::{
-    PresentFrame, present_frame, render_simulation, resize_sim_texture, resize_voxel_view,
+    PresentFrame, present_frame, render_simulation_frame, resize_sim_texture, resize_voxel_view,
     upload_egui_textures,
 };
 use self::geometry::{clamp_window_geometry, clamp_window_size, monitor_rects};
@@ -332,8 +332,8 @@ impl PowderToyApp {
             }
         }
 
-        if !render_simulation(&window, state, &mut self.last_present_instant) {
-            return;
+        if state.screen == AppScreen::InGame {
+            state.tick_frame();
         }
         let sim_tex_id = gpu.sim_tex_id;
         let view3d_tex_id = gpu.view3d_tex_id;
@@ -346,8 +346,9 @@ impl PowderToyApp {
                 requested_sim_size = Some(size);
             }
         });
-        resize_sim_texture(&window, gpu, state, requested_sim_size);
+        resize_sim_texture(gpu, state, requested_sim_size);
         resize_voxel_view(gpu, state);
+        render_simulation_frame(state);
 
         egui_winit.handle_platform_output(&window, full_output.platform_output);
 
@@ -377,6 +378,8 @@ impl PowderToyApp {
                 freed_textures: &freed_textures,
             },
         );
+        self.last_present_instant = Instant::now();
+        state.sample_presented_frame();
     }
 }
 
@@ -482,18 +485,28 @@ impl ApplicationHandler for PowderToyApp {
         // Wake for whichever comes first: the next presented frame or the next
         // simulation step. A draw cap below the tick rate must not slow the
         // simulation down, and the step itself is paced inside `tick_frame`.
-        let mut interval = crate::prefs::draw_interval_secs(state.draw_fps());
-        if let Some(tick) = state.prefs.fps_limit.interval_secs() {
-            interval = interval.min(tick);
-        }
-        let interval = std::time::Duration::from_secs_f32(interval);
-        let due = self.last_present_instant + interval;
+        let draw_interval = std::time::Duration::from_secs_f32(
+            crate::prefs::draw_interval_secs(state.draw_fps()),
+        );
+        let draw_due = self.last_present_instant + draw_interval;
+        let sim_due = state.next_sim_tick_due();
         let now = Instant::now();
-        if now >= due {
+        if now >= draw_due {
             window.request_redraw();
-            event_loop.set_control_flow(ControlFlow::WaitUntil(now + interval));
+            let wake = sim_due.map_or(now + draw_interval, |t| t.min(now + draw_interval));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
+        } else if let Some(tick_at) = sim_due {
+            if now >= tick_at {
+                // Simulation target exceeds the render cap: advance ticks here
+                // without spinning `WM_PAINT` before the next draw deadline.
+                state.tick_frame();
+                let next_tick = state.next_sim_tick_due().unwrap_or(draw_due);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(draw_due.min(next_tick)));
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(draw_due.min(tick_at)));
+            }
         } else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(draw_due));
         }
     }
 

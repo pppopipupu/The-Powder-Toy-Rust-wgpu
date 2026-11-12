@@ -13,7 +13,6 @@
 use cubecl::bytes::Bytes;
 use cubecl::client::Client;
 use cubecl::server::Handle;
-
 use tpt_core::constants::{PT_NONE, pmap_id};
 use tpt_core::particle::GpuParticle;
 
@@ -79,10 +78,14 @@ impl SimBuffers {
     /// one `offset_start` / `offset_end` sub-range per array, with the map words
     /// of their pixels. The whole pool is uploaded when the SoA was replaced
     /// wholesale (an empty list: creation / reset / save restore), when a host
-    /// pass wrote arbitrary fields ([`FULL_PARTICLE_UPLOAD`]), when a read-back
-    /// or pool reallocation just made the whole shadow authoritative
-    /// (`gpu_particles_dirty == false`), or when a canvas resize emptied the
-    /// pool (`next_slot == 0`).
+    /// pass wrote arbitrary fields ([`FULL_PARTICLE_UPLOAD`]), or when a canvas
+    /// resize emptied the pool (`next_slot == 0`).
+    ///
+    /// A read-back does *not* force a whole-pool upload: it makes the host the
+    /// device's equal, so the slots the caller touched are the only difference.
+    /// Treating "just read back" as authoritative made the first brush frame
+    /// after each undo snapshot re-send every array (173 MB on a 1600x900
+    /// canvas) for a handful of changed slots.
     ///
     /// This is what keeps painting from rewinding the world: after the
     /// mouse-down undo snapshot the host shadow is frozen at the click state,
@@ -98,12 +101,11 @@ impl SimBuffers {
         let out_of_range = slots
             .iter()
             .any(|&id| id != FULL_PARTICLE_UPLOAD && id as usize >= self.capacity);
-        // `gpu_particles_dirty == false` means a full read-back made the whole
-        // shadow current (or a pool reallocation just created fresh device
-        // buffers), so the whole array is authoritative. `next_slot == 0` marks
-        // a pool reset whose recorded slot ids belong to the old buffers.
+        // An empty list is the wholesale-replacement sentinel (creation, reset,
+        // save restore) and `FULL_PARTICLE_UPLOAD` the direct-field writer;
+        // `next_slot == 0` marks a pool reset whose recorded slot ids belong to
+        // the old buffers.
         let full = slots.is_empty()
-            || !self.gpu_particles_dirty
             || self.next_slot == 0
             || out_of_range
             || slots.contains(&FULL_PARTICLE_UPLOAD);
@@ -123,9 +125,14 @@ impl SimBuffers {
         self.upload_particle_patch(&slots);
 
         self.host_dirty_slots.clear();
-        // Outside the uploaded slots the host may still lag the device; claiming
-        // otherwise would let `ensure_host_current` skip a needed read-back.
-        self.gpu_particles_dirty = true;
+        // A full upload synchronised every host slot to the device. A sparse
+        // patch only wrote the slots the caller touched (plus their map
+        // words), so it preserves whether other slots on the device already
+        // diverged (`gpu_particles_dirty`) instead of forcing paused canvases
+        // to treat themselves as dirty on the next snapshot.
+        if full {
+            self.gpu_particles_dirty = false;
+        }
     }
 
     /// Upload every particle array in full.
@@ -343,15 +350,14 @@ impl SimBuffers {
 
     /// Bring the host air grids up to date with the device.
     pub fn sync_air_gpu_to_host(&mut self) -> bool {
+        // `air_ovx/ovy/opv/ohv` are internal scratch buffers overwritten on
+        // every air pass (`air_kernel`), so only the four authoritative fields
+        // cross back to the host.
         let handles = vec![
             self.gpu_air_vx.clone(),
             self.gpu_air_vy.clone(),
             self.gpu_air_pv.clone(),
             self.gpu_air_hv.clone(),
-            self.gpu_air_ovx.clone(),
-            self.gpu_air_ovy.clone(),
-            self.gpu_air_opv.clone(),
-            self.gpu_air_ohv.clone(),
         ];
         let Ok(readback) = self.client.read(handles) else {
             return false;
@@ -361,10 +367,6 @@ impl SimBuffers {
         read_back(it.next(), &mut self.air_vy);
         read_back(it.next(), &mut self.air_pv);
         read_back(it.next(), &mut self.air_hv);
-        read_back(it.next(), &mut self.air_ovx);
-        read_back(it.next(), &mut self.air_ovy);
-        read_back(it.next(), &mut self.air_opv);
-        read_back(it.next(), &mut self.air_ohv);
         self.gpu_air_dirty = false;
         self.gpu_dirty = self.gpu_particles_dirty || self.gpu_maps_dirty || self.gpu_air_dirty;
         self.host_air_dirty = false;
@@ -405,6 +407,7 @@ impl SimBuffers {
     /// `trim_particles` limits the particle copy to the used prefix of the pool.
     /// Returns `false` when the device read failed (host shadows untouched).
     fn read_back_device(&mut self, trim_particles: bool) -> bool {
+        let has_particles = self.next_slot > 0 || self.gpu_spawn_used;
         let used_slots = self.used_slot_bound();
         let trim = if trim_particles {
             ((self.capacity - used_slots) * WORD) as u64
@@ -412,78 +415,71 @@ impl SimBuffers {
             0
         };
 
-        let handles: Vec<Handle> = vec![
-            self.gpu_part_ty.clone().offset_end(trim),
-            self.gpu_part_life.clone().offset_end(trim),
-            self.gpu_part_ctype.clone().offset_end(trim),
-            self.gpu_part_x.clone().offset_end(trim),
-            self.gpu_part_y.clone().offset_end(trim),
-            self.gpu_part_vx.clone().offset_end(trim),
-            self.gpu_part_vy.clone().offset_end(trim),
-            self.gpu_part_temp.clone().offset_end(trim),
-            self.gpu_part_flags.clone().offset_end(trim),
-            self.gpu_part_tmp.clone().offset_end(trim),
-            self.gpu_part_tmp2.clone().offset_end(trim),
-            self.gpu_part_tmp3.clone().offset_end(trim),
-            self.gpu_part_tmp4.clone().offset_end(trim),
-            self.gpu_part_dcolour.clone().offset_end(trim),
-            self.gpu_pmap.clone(),
-            self.gpu_photons.clone(),
+        // Only authoritative buffers cross back: `gpu_framebuf`, `gpu_fire_*`
+        // (render-only) and `gpu_air_o*` (air-kernel scratch) stay on the
+        // device, and `gpu_wall_bmap` / `gpu_fan_*` are host-authored. When no
+        // particle exists on either side, `part_*` and `pmap`/`photons` are
+        // already empty on the host and do not need a multi-megabyte transfer.
+        let mut handles: Vec<Handle> = Vec::with_capacity(21);
+        if has_particles {
+            handles.extend([
+                self.gpu_part_ty.clone().offset_end(trim),
+                self.gpu_part_life.clone().offset_end(trim),
+                self.gpu_part_ctype.clone().offset_end(trim),
+                self.gpu_part_x.clone().offset_end(trim),
+                self.gpu_part_y.clone().offset_end(trim),
+                self.gpu_part_vx.clone().offset_end(trim),
+                self.gpu_part_vy.clone().offset_end(trim),
+                self.gpu_part_temp.clone().offset_end(trim),
+                self.gpu_part_flags.clone().offset_end(trim),
+                self.gpu_part_tmp.clone().offset_end(trim),
+                self.gpu_part_tmp2.clone().offset_end(trim),
+                self.gpu_part_tmp3.clone().offset_end(trim),
+                self.gpu_part_tmp4.clone().offset_end(trim),
+                self.gpu_part_dcolour.clone().offset_end(trim),
+                self.gpu_pmap.clone(),
+                self.gpu_photons.clone(),
+            ]);
+        }
+        handles.extend([
             self.gpu_air_vx.clone(),
             self.gpu_air_vy.clone(),
             self.gpu_air_pv.clone(),
             self.gpu_air_hv.clone(),
-            self.gpu_air_ovx.clone(),
-            self.gpu_air_ovy.clone(),
-            self.gpu_air_opv.clone(),
-            self.gpu_air_ohv.clone(),
-            self.gpu_fan_vx.clone(),
-            self.gpu_fan_vy.clone(),
-            self.gpu_wall_bmap.clone(),
             self.gpu_wall_emap.clone(),
-            self.gpu_fire_r.clone(),
-            self.gpu_fire_g.clone(),
-            self.gpu_fire_b.clone(),
-            self.gpu_framebuf.clone(),
-        ];
+        ]);
 
         let Ok(readback) = self.client.read(handles) else {
             return false;
         };
 
         let mut it = readback.iter();
-        read_back(it.next(), &mut self.part_ty);
-        read_back(it.next(), &mut self.part_life);
-        read_back(it.next(), &mut self.part_ctype);
-        read_back(it.next(), &mut self.part_x);
-        read_back(it.next(), &mut self.part_y);
-        read_back(it.next(), &mut self.part_vx);
-        read_back(it.next(), &mut self.part_vy);
-        read_back(it.next(), &mut self.part_temp);
-        read_back(it.next(), &mut self.part_flags);
-        read_back(it.next(), &mut self.part_tmp);
-        read_back(it.next(), &mut self.part_tmp2);
-        read_back(it.next(), &mut self.part_tmp3);
-        read_back(it.next(), &mut self.part_tmp4);
-        read_back(it.next(), &mut self.part_dcolour);
-        read_back(it.next(), &mut self.pmap);
-        read_back(it.next(), &mut self.photons);
+        if has_particles {
+            read_back(it.next(), &mut self.part_ty);
+            read_back(it.next(), &mut self.part_life);
+            read_back(it.next(), &mut self.part_ctype);
+            read_back(it.next(), &mut self.part_x);
+            read_back(it.next(), &mut self.part_y);
+            read_back(it.next(), &mut self.part_vx);
+            read_back(it.next(), &mut self.part_vy);
+            read_back(it.next(), &mut self.part_temp);
+            read_back(it.next(), &mut self.part_flags);
+            read_back(it.next(), &mut self.part_tmp);
+            read_back(it.next(), &mut self.part_tmp2);
+            read_back(it.next(), &mut self.part_tmp3);
+            read_back(it.next(), &mut self.part_tmp4);
+            read_back(it.next(), &mut self.part_dcolour);
+            read_back(it.next(), &mut self.pmap);
+            read_back(it.next(), &mut self.photons);
+        } else {
+            self.pmap.fill(0);
+            self.photons.fill(0);
+        }
         read_back(it.next(), &mut self.air_vx);
         read_back(it.next(), &mut self.air_vy);
         read_back(it.next(), &mut self.air_pv);
         read_back(it.next(), &mut self.air_hv);
-        read_back(it.next(), &mut self.air_ovx);
-        read_back(it.next(), &mut self.air_ovy);
-        read_back(it.next(), &mut self.air_opv);
-        read_back(it.next(), &mut self.air_ohv);
-        read_back(it.next(), &mut self.fan_vx);
-        read_back(it.next(), &mut self.fan_vy);
-        read_back(it.next(), &mut self.wall_bmap);
         read_back(it.next(), &mut self.wall_emap);
-        read_back(it.next(), &mut self.fire_r);
-        read_back(it.next(), &mut self.fire_g);
-        read_back(it.next(), &mut self.fire_b);
-        read_back(it.next(), &mut self.framebuf_rgba);
         true
     }
 
@@ -712,6 +708,114 @@ impl SimBuffers {
         let count = crate::live_count::refresh_live_count(self)?;
         self.active_count = count;
         Some(count)
+    }
+
+    /// Starts a non-blocking device probe for pixel `(x, y)`.
+    ///
+    /// Used by the HUD inspector so hovering or dragging across a large canvas
+    /// never stalls the render loop waiting for the GPU queue to drain.
+    pub fn probe_pixel_async(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Option<crate::live_count::PendingRead<Option<PixelProbe>>> {
+        let pixel = self.pixel_index(x, y)?;
+        let cell = self.cell_index(x, y)?;
+        let word_handle = |handle: Handle, index: usize, len: usize| {
+            handle
+                .offset_start((index * WORD) as u64)
+                .offset_end(((len - index - 1) * WORD) as u64)
+        };
+        let handles = vec![
+            word_handle(self.gpu_pmap.clone(), pixel, self.pmap.len()),
+            word_handle(self.gpu_photons.clone(), pixel, self.photons.len()),
+            word_handle(self.gpu_wall_bmap.clone(), cell, self.wall_bmap.len()),
+            word_handle(self.gpu_wall_emap.clone(), cell, self.wall_emap.len()),
+            word_handle(self.gpu_air_pv.clone(), cell, self.air_pv.len()),
+        ];
+        let client = self.client.clone();
+        let capacity = self.capacity;
+        let part_handles = [
+            self.gpu_part_ty.clone(),
+            self.gpu_part_life.clone(),
+            self.gpu_part_ctype.clone(),
+            self.gpu_part_x.clone(),
+            self.gpu_part_y.clone(),
+            self.gpu_part_vx.clone(),
+            self.gpu_part_vy.clone(),
+            self.gpu_part_temp.clone(),
+            self.gpu_part_flags.clone(),
+            self.gpu_part_tmp.clone(),
+            self.gpu_part_tmp2.clone(),
+            self.gpu_part_tmp3.clone(),
+            self.gpu_part_tmp4.clone(),
+            self.gpu_part_dcolour.clone(),
+        ];
+        let fut = Box::pin(async move {
+            let readback = client.read_async(handles).await.ok()?;
+            let word = |index: usize| -> u32 {
+                let bytes: &[u8] = &readback[index];
+                if bytes.len() < WORD {
+                    return 0;
+                }
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            };
+            let pmap_word = word(0);
+            let photons_word = word(1);
+            let wall = (word(2) & 0xFF) as u8;
+            let emap = (word(3) & 0xFF) as u8;
+            let pressure = f32::from_bits(word(4));
+
+            let id = pmap_id(pmap_word).or_else(|| pmap_id(photons_word));
+            let particle = match id {
+                Some(id) if (id as usize) < capacity => {
+                    let id = id as usize;
+                    let handles = part_handles
+                        .into_iter()
+                        .map(|h| {
+                            h.offset_start((id * WORD) as u64)
+                                .offset_end(((capacity - id - 1) * WORD) as u64)
+                        })
+                        .collect();
+                    let rb = client.read_async(handles).await.ok()?;
+                    let w = |index: usize| -> u32 {
+                        let bytes: &[u8] = &rb[index];
+                        if bytes.len() < WORD {
+                            return 0;
+                        }
+                        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                    };
+                    let p = GpuParticle {
+                        ty: w(0),
+                        life: w(1) as i32,
+                        ctype: w(2),
+                        x: f32::from_bits(w(3)),
+                        y: f32::from_bits(w(4)),
+                        vx: f32::from_bits(w(5)),
+                        vy: f32::from_bits(w(6)),
+                        temp: f32::from_bits(w(7)),
+                        flags: w(8),
+                        tmp: w(9) as i32,
+                        tmp2: w(10) as i32,
+                        tmp3: w(11) as i32,
+                        tmp4: w(12) as i32,
+                        dcolour: w(13),
+                        _pad0: 0,
+                        _pad1: 0,
+                    };
+                    if p.ty == PT_NONE { None } else { Some(p) }
+                }
+                _ => None,
+            };
+
+            Some(PixelProbe {
+                particle,
+                wall,
+                emap,
+                pressure,
+            })
+        });
+        Some(crate::live_count::PendingRead::spawn(fut))
     }
 }
 

@@ -460,11 +460,12 @@ impl SimulationEngine {
         self.bufs.gpu_maps_dirty = true;
         self.bufs.gpu_air_dirty = true;
 
-        // Keep the HUD particle counter honest: the kernels create and destroy
-        // particles behind the host's back, so refresh the incremental count
-        // from one trimmed `part_ty` read every half second.
+        // Keep the HUD particle counter honest without blocking the render
+        // loop: poll any finished reduction every tick and launch the next
+        // async readback every half second.
+        live_count::poll_live_count(&mut self.bufs);
         if self.frame_count.is_multiple_of(30) {
-            self.bufs.refresh_active_count_device();
+            live_count::start_live_count_async(&mut self.bufs);
         }
 
         // Rigid bodies. The device owns the steady state: the host solver is

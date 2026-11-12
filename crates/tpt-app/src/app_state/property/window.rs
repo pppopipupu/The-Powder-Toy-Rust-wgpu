@@ -173,7 +173,9 @@ impl AppState {
     /// shows the wall report in the window instead
     /// (`SimulationSample`'s wall fields).
     pub fn sample_property_window(&mut self, x: i32, y: i32) {
-        let particle = self.particle_at(x, y);
+        // Shift-click seeds the window from the clicked pixel, so it bypasses
+        // the per-frame HUD probe cache.
+        let particle = self.particle_at_now(x, y);
         if particle.is_none() && self.wall_at(x, y).is_none() {
             return;
         }
