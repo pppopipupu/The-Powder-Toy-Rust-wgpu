@@ -53,7 +53,15 @@ jobs:
             ext: ''
             rustflags: ''
           - name: macos-aarch64
-            os: macos-latest
+            # `macos-latest` is a rolling label that migrates gradually over
+            # 1-2 months (actions/runner-images README): two runs of the same
+            # tag can land on different macOS images and SDKs. Pin the arm64
+            # image it currently resolves to, `macos-26`, which is also the
+            # image 0.2.0 built on. The hosted arm64 pool is capacity-limited:
+            # a queued job can be cancelled with "The job was not acquired by
+            # Runner of type hosted" before any step runs (0.2.1). release-
+            # retry.yml detects that cancellation and reruns the whole run.
+            os: macos-26
             target: aarch64-apple-darwin
             ext: ''
             rustflags: ''
@@ -77,6 +85,10 @@ jobs:
         run: |
           rustup update stable --no-self-update
           rustup target add --toolchain stable ${{ matrix.target }}
+          # `stable` is a rolling channel: two tags can compile with different
+          # compilers. Record the exact versions so a regression is attributable.
+          rustc +stable -Vv
+          cargo +stable -V
 
       - name: Build
         env:
@@ -88,7 +100,12 @@ jobs:
           name: tpt-app-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/tpt-app${{ matrix.ext }}
           if-no-files-found: error
-          retention-days: 3
+          # A self-healed rerun re-uploads the same artifact name; without
+          # overwrite the second attempt dies on the name collision.
+          overwrite: true
+          # Keep successful artifacts even when publish is skipped, so a
+          # wedged macOS job does not discard the other two binaries.
+          retention-days: 7
 
   release:
     name: publish release
@@ -106,8 +123,31 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
+          shopt -s nullglob
           tag="${GITHUB_REF_NAME}"
           mkdir -p dist
+
+          # Every platform must upload a non-empty binary. Validate up front so
+          # a missing/empty artifact names the platform instead of failing later
+          # with a bare `chmod: cannot access ...`.
+          bins=(
+            "tpt-app-x86_64-pc-windows-msvc/tpt-app.exe"
+            "tpt-app-x86_64-unknown-linux-gnu/tpt-app"
+            "tpt-app-aarch64-apple-darwin/tpt-app"
+          )
+          missing=()
+          for rel in "${bins[@]}"; do
+            path="artifacts/$rel"
+            if [ ! -s "$path" ]; then
+              missing+=("$rel")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::missing or empty build artifacts: %s\n' "${missing[*]}"
+            echo "Downloaded artifacts:"
+            find artifacts -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
+            exit 1
+          fi
 
           # The exec bit does not survive the artifact round trip, so restore it
           # before archiving; `tar` records it in the Unix mode.
@@ -126,7 +166,14 @@ jobs:
             python3 -m zipfile -c \
               "../../dist/tpt-app-${tag}-x86_64-windows.zip" tpt-app.exe)
 
-          ls -l dist
+          # Exactly the three shipped archives must exist. Without `nullglob`,
+          # an empty `dist/` would expand to a literal `dist/*` argument.
+          archives=(dist/*)
+          if [ "${#archives[@]}" -ne 3 ]; then
+            printf '::error::expected 3 archives, found %d\n' "${#archives[@]}"
+            exit 1
+          fi
+          ls -l "${archives[@]}"
 
       - name: Publish
         env:
@@ -134,9 +181,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
           tag="${GITHUB_REF_NAME}"
+          archives=(dist/*)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::no archives to publish"
+            exit 1
+          fi
+          # A re-run or re-pushed tag finds the release already present; upload
+          # with --clobber so the publish step is idempotent.
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --clobber
+            gh release upload "$tag" "${archives[@]}" --clobber
           else
-            gh release create "$tag" dist/* --title "$tag" --generate-notes
+            gh release create "$tag" "${archives[@]}" --title "$tag" --generate-notes
           fi
