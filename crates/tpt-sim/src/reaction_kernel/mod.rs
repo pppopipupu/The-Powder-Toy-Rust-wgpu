@@ -17,6 +17,7 @@
 //! | [`electronics`] | the electrical layer: staged spark conduction, switches, powered devices, storage, sensors (`FILT` serialisation), arcs, `ETRD` plasma bolts |
 //! | [`nuclear`] | decay chains, shields, isotopes, `PTNM`, `PROT`, viruses, `WARP`, converters |
 //! | [`special`] | force/pressure materials, plants, residue powders, `DMG`, `SEED` / `VINE`, refraction, `QRTZ`, photon sources |
+//! | [`bism`] | the port's `BISM` addition: oxidation film, burning, thermocouple, melt crystallisation and neutron capture |
 //! | [`modext`] | the second element set (`PT_FNTC`..`PT_MGNT`, ids `195..=238`), grouped by subsystem; launchers are scaffolding for its phase-2 kernels |
 //! | [`love`] | the `LOVE` / `LOLZ` 9x9 rule-table blocks |
 //! | [`force`] | gather-model `ACEL` / `DCEL` / `HEAC` / `RPEL` / `FRAY`, magnets, projectiles |
@@ -59,13 +60,14 @@
 //!   read-back reconciles the pool, so no explicit free-list bookkeeping is
 //!   required on the device.
 
+mod bism;
 mod combustion;
 mod corrosion;
 mod electronics;
 mod energy;
 pub(crate) mod energy_entry;
-mod fluid;
 mod flood_component;
+mod fluid;
 mod force;
 mod glow;
 mod life;
@@ -1153,6 +1155,10 @@ pub fn step_reactions_gpu(bufs: &mut SimBuffers, registry: &ElementRegistry, fra
     launch_electronics_passes(bufs, &dims);
     nuclear::launch(bufs, &dims);
     special::launch(bufs, &dims);
+    // The port's `BISM` pass: oxidation chemistry, burning, the thermocouple
+    // and the melt crystallisation request. Runs before the spawn expansion so
+    // its creations drain in this tick.
+    bism::launch(bufs, &dims);
     // The second element set (ids `195..=238`). It runs before the force gather
     // and before the spawn expansion, so its creations drain in this tick.
     modext::launch(bufs, &dims, frame_seed);

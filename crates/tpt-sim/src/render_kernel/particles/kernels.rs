@@ -13,7 +13,7 @@ use super::super::{
 };
 use super::colour::{particle_cola, particle_rgb};
 use super::elements_special::pipe_pixel_mode;
-use super::pixel_mode::effective_pixel_mode;
+use super::pixel_mode::{effective_pixel_mode, fancy_view};
 use super::{EFFECT_LINES, packed_at};
 
 /// TPT `Renderer.cpp:527-538` `EFFECT_LINES`: a `SOAP` particle attached at both
@@ -86,6 +86,7 @@ pub(crate) fn soap_outline(
     hdisp_min: f32,
     hdisp_max: f32,
     decoration_level: u32,
+    fancy: u32,
     tick: u32,
 ) -> u32 {
     let mut dst = dst_in;
@@ -137,10 +138,13 @@ pub(crate) fn soap_outline(
                 part_life[pslot],
                 part_ctype[pslot],
                 partner_slot + 1u32,
+                target_x,
+                target_y,
                 part_dcolour[pslot],
                 colour_mode,
                 pretty_powder,
                 mode,
+                fancy,
                 part_tmp[pslot],
                 part_tmp2[pslot],
                 part_tmp3[pslot],
@@ -241,6 +245,9 @@ pub fn render_particles_base_kernel(
 ) {
     let idx = ABSOLUTE_POS as u32;
     if idx < xres * yres {
+        let px = (idx % xres) as i32;
+        let py = (idx / xres) as i32;
+        let fancy = fancy_view(render_mode);
         // The energy layer is drawn over the matter layer.
         let mut packed = photons[idx as usize];
         if packed == 0u32 {
@@ -330,10 +337,13 @@ pub fn render_particles_base_kernel(
                         life,
                         ctype,
                         pid,
+                        px,
+                        py,
                         dcolour,
                         colour_mode,
                         pretty_powder,
                         mode,
+                        fancy,
                         tmp,
                         tmp2,
                         tmp3,
@@ -398,6 +408,7 @@ pub fn render_particles_base_kernel(
                         hdisp_min,
                         hdisp_max,
                         decoration_level,
+                        fancy,
                         tick,
                     );
                     // TPT order: FLAT overwrites, then BLEND, then ADD.

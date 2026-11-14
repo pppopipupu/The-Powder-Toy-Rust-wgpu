@@ -35,10 +35,10 @@
 //! `2 * CELLS` grid those two expressions are identical
 //! (`NCELL * 4 = (2 * XCELLS) * (2 * YCELLS)`). In both cases the transform
 //! factor cancels and the kernel evaluates to the physical
-//! `-M_GRAV * d / |d|^3`. The device-vs-brute-force regression test
-//! (`tests/gpu_sim/gravity_fft.rs`) pins this equivalence on a canvas whose
-//! padded size is strictly larger than `2 * cells` (`96x96` -> `24x24` cells ->
-//! `64x64` transform).
+//! `-M_GRAV * d / |d|^3`. (The device-vs-brute-force equivalence used to be
+//! pinned by an integration test on a canvas whose padded size is strictly
+//! larger than `2 * cells` (`96x96` -> `24x24` cells -> `64x64` transform);
+//! that suite is gone, so re-check it under `smoke/` when the scale changes.)
 //!
 //! Kernel spectra depend on the grid size alone, so they are built once per
 //! canvas size (two forward transforms) and reused until the canvas changes.

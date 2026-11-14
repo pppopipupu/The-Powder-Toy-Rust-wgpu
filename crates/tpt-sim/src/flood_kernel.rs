@@ -386,9 +386,7 @@ pub fn flood_fill_device(bufs: &mut SimBuffers, x: i32, y: i32, elem_ty: u32) {
     // Arm the creation queue for the records [`flood_create_kernel`] pushes
     // below: empty it and rebuild the device free-slot window.
     crate::reaction_kernel::begin_pending_creates(bufs);
-    let changed = bufs
-        .client
-        .create_from_slice(bytemuck::cast_slice(&[0u32]));
+    let changed = bufs.client.create_from_slice(bytemuck::cast_slice(&[0u32]));
 
     unsafe {
         clear_marks_kernel::launch_unchecked(
@@ -1217,9 +1215,7 @@ pub fn flood_property(
             slots as u32,
         );
         // `flood_prop` has no distance cap: run the walk to its fixed point.
-        let changed = bufs
-            .client
-            .create_from_slice(bytemuck::cast_slice(&[0u32]));
+        let changed = bufs.client.create_from_slice(bytemuck::cast_slice(&[0u32]));
         spread_until_stable(bufs, &changed, || {
             property_spread_kernel::launch_unchecked(
                 &bufs.client,

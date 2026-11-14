@@ -10,7 +10,7 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::framebuffer::{add_px, blend_px, fb_blue, fb_green, fb_red, hash01, minf, pack_rgb};
-use super::particles::{effective_pixel_mode, packed_at, particle_rgb};
+use super::particles::{effective_pixel_mode, fancy_view, packed_at, particle_rgb};
 use super::{
     ELEM_COLOUR, ELEM_HIGH_TEMP, ELEM_PIXEL_MODE, ELEM_PROPS, ELEM_WORDS, PMAP_ID_SHIFT,
     PMAP_TYPE_MASK, PMODE_FLARE, PMODE_LFLARE, PMODE_SPARK, RAY_STEPS,
@@ -112,10 +112,13 @@ fn flare_pixels(
                             part_life[nslot],
                             part_ctype[nslot],
                             npid,
+                            x,
+                            y,
                             part_dcolour[nslot],
                             colour_mode,
                             pretty_powder,
                             nmode,
+                            fancy_view(render_mode),
                             part_tmp[nslot],
                             part_tmp2[nslot],
                             part_tmp3[nslot],
@@ -289,10 +292,13 @@ fn axis_rays(
                             part_life[nslot],
                             part_ctype[nslot],
                             npid,
+                            x,
+                            y,
                             part_dcolour[nslot],
                             colour_mode,
                             pretty_powder,
                             nmode,
+                            fancy_view(render_mode),
                             part_tmp[nslot],
                             part_tmp2[nslot],
                             part_tmp3[nslot],

@@ -49,6 +49,8 @@ pub(crate) fn element_graphics_rgb(
     ctype: u32,
     temp: f32,
     pid: u32,
+    px: i32,
+    py: i32,
     dcolour: u32,
     colour_mode: u32,
     decoration_level: u32,
@@ -61,13 +63,21 @@ pub(crate) fn element_graphics_rgb(
     tick: u32,
     elem_props: &[u32],
     elem_count: u32,
+    fancy: u32,
 ) -> (f32, f32, f32) {
     if ty == PT_FIRE {
         rgb_from_u32(flame_colour(life))
     } else if ty == PT_PLSM {
         rgb_from_u32(plasma_colour(life))
     } else if ty == PT_LAVA {
-        lava_graphics(life)
+        // Port addition: a `LAVA` whose `ctype` is `BISM` is molten bismuth.
+        if ctype == PT_BISM {
+            bism_molten_graphics(life)
+        } else {
+            lava_graphics(life)
+        }
+    } else if ty == PT_BISM {
+        bism_graphics(base, ctype, tmp, pid, px, py, tick, fancy)
     } else if ty == PT_SMKE {
         smke_graphics()
     } else if ty == PT_PHOT {
@@ -239,6 +249,8 @@ pub(crate) fn graphics_rgb(
     ctype: u32,
     temp: f32,
     pid: u32,
+    px: i32,
+    py: i32,
     dcolour: u32,
     colour_mode: u32,
     decoration_level: u32,
@@ -251,6 +263,7 @@ pub(crate) fn graphics_rgb(
     tick: u32,
     elem_props: &[u32],
     elem_count: u32,
+    fancy: u32,
 ) -> (f32, f32, f32) {
     if ty == PT_PIPE || ty == PT_PPIP {
         let cargo = pipe_cargo(ctype);
@@ -272,6 +285,8 @@ pub(crate) fn graphics_rgb(
                 tmp4 as u32,
                 temp,
                 pid,
+                px,
+                py,
                 0u32,
                 colour_mode,
                 decoration_level,
@@ -284,6 +299,7 @@ pub(crate) fn graphics_rgb(
                 tick,
                 elem_props,
                 elem_count,
+                fancy,
             )
         } else {
             // TPT `PIPE.cpp:397-416`: empty pipe colour flags.
@@ -306,6 +322,8 @@ pub(crate) fn graphics_rgb(
             ctype,
             temp,
             pid,
+            px,
+            py,
             dcolour,
             colour_mode,
             decoration_level,
@@ -318,6 +336,7 @@ pub(crate) fn graphics_rgb(
             tick,
             elem_props,
             elem_count,
+            fancy,
         )
     }
 }
@@ -711,10 +730,13 @@ pub(crate) fn particle_rgb(
     life: i32,
     ctype: u32,
     pid: u32,
+    px: i32,
+    py: i32,
     dcolour: u32,
     colour_mode: u32,
     pretty_powder: u32,
     mode: u32,
+    fancy: u32,
     tmp: i32,
     tmp2: i32,
     tmp3: i32,
@@ -739,6 +761,8 @@ pub(crate) fn particle_rgb(
             ctype,
             temp,
             pid,
+            px,
+            py,
             dcolour,
             colour_mode,
             decoration_level,
@@ -751,6 +775,7 @@ pub(crate) fn particle_rgb(
             tick,
             elem_props,
             elem_count,
+            fancy,
         );
     }
     c = hot_glow_rgb(c, props, high_temp, temp);

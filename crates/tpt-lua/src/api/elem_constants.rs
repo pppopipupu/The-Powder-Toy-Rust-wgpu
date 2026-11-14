@@ -241,6 +241,7 @@ pub(super) const ELEMENT_CONSTANTS: &[(&str, u32)] = &[
     ("DEFAULT_PT_PCON", PT_PCON),
     ("DEFAULT_PT_MISL", PT_MISL),
     ("DEFAULT_PT_MGNT", PT_MGNT),
+    ("DEFAULT_PT_BISM", PT_BISM),
 ];
 
 pub(super) const TYPE_CONSTANTS: &[(&str, u32)] = &[

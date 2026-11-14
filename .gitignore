@@ -28,6 +28,8 @@ $RECYCLE.BIN/
 /stamps/
 /screenshots/
 /recordings/
+# Local smoke scratch: throwaway probes and the run scripts below.
+/smoke/
 *.log
 *.tmp
 *.bak

@@ -7,8 +7,8 @@
 //! transition points, ...), so the GPU kernels can stay data-driven.
 //!
 //! The built-in table covers TPT's classic element set, the batch 1 and batch 2
-//! additions, and the mod's 44 elements (`PT_NONE ..= PT_MGNT`, ids
-//! `0..BUILTIN_ELEMENT_COUNT`).
+//! additions, the mod's 44 elements (`PT_NONE ..= PT_MGNT`) and the port's own
+//! `BISM` (`PT_BISM`).
 //! Slots `BUILTIN_ELEMENT_COUNT..PT_NUM` are kept as disabled definitions and
 //! are handed out by [`ElementRegistry::allocate_custom`] for elements created
 //! from Lua via `elem.allocate(group, name)`.
@@ -346,8 +346,8 @@ pub fn carries_ctype(id: u32) -> bool {
 /// (`Element.cpp:49`), so only an element that assigns `Graphics = &...` (or the
 /// explicit `Graphics = nullptr` of `DUST`, `DRAY` and `SAWD`) leaves the
 /// property defaults behind. The C++ table marks 119 elements (90 from TPT plus
-/// the mod's 29); the port keeps their static mode bits in the data table and
-/// their dynamic half in `render_kernel/particles/`.
+/// the mod's 29); the port's `BISM` adds one. The port keeps their static mode
+/// bits in the data table and their dynamic half in `render_kernel/particles/`.
 pub fn has_graphics_override(id: u32) -> bool {
     matches!(id, |PT_PLNT| PT_LCRY
         | PT_STKM
@@ -467,7 +467,10 @@ pub fn has_graphics_override(id: u32) -> bool {
         | PT_RUBR
         | PT_SUN
         | PT_TIMC
-        | PT_UVRD)
+        | PT_UVRD
+        // Port addition: the oxide film colour / pixel mode is computed per
+        // particle from `ctype`, `tmp` and the render mode.
+        | PT_BISM)
 }
 
 /// GPU-uploadable flat struct of element physics properties.
@@ -1015,6 +1018,9 @@ fn builtin_elements() -> Vec<ElementDef> {
     // The mod's 44 elements follow `SEED` as `PT_FNTC ..= PT_MGNT`, in the
     // order its `meson.build` lists them.
     data::modext::push(&mut elements);
+    // Port additions above both tables (`PT_BISM`), so every reference and mod
+    // id keeps its slot.
+    data::bism::push(&mut elements);
 
     // Elements without their own `Graphics` function keep the constructor's
     // `Element::defaultGraphics`, which derives the render mode from the
@@ -1074,8 +1080,10 @@ mod tests {
         assert_eq!(reg.get(PT_QGPP).name, "QGP");
         assert_eq!(reg.get(PT_UVRD).name, "UV");
         assert_eq!(reg.get(PT_MGNT).name, "EMGT");
-        assert_eq!(reg.get(BUILTIN_ELEMENT_COUNT as u32 - 1).name, "EMGT");
-        assert_eq!(reg.get(BUILTIN_ELEMENT_COUNT as u32 - 1).id, PT_MGNT);
+        // The port's addition is the last built-in slot.
+        assert_eq!(reg.get(BUILTIN_ELEMENT_COUNT as u32 - 1).name, "BISM");
+        assert_eq!(reg.get(BUILTIN_ELEMENT_COUNT as u32 - 1).id, PT_BISM);
+        assert_eq!(reg.get(PT_BISM).category, MenuCategory::Solids);
         assert_eq!(reg.get(PT_CO2).category, MenuCategory::Gases);
         assert_eq!(reg.get(PT_PSTE).category, MenuCategory::Liquids);
         assert_eq!(reg.get(PT_THRM).category, MenuCategory::Explosives);
@@ -1109,11 +1117,11 @@ mod tests {
     fn graphics_override_table_matches_the_cpp_table() {
         // `Element.cpp:49` installs `defaultGraphics`; `grep Graphics =` over
         // `src/simulation/elements/*.cpp` finds 90 assignments in TPT plus the
-        // mod's 29, for 119 total.
+        // mod's 29, and the port's `BISM` adds one more.
         let overrides = (0..PT_NUM as u32)
             .filter(|&id| has_graphics_override(id))
             .count();
-        assert_eq!(overrides, 119);
+        assert_eq!(overrides, 120);
         assert!(!has_graphics_override(PT_NONE));
     }
 
@@ -1147,9 +1155,10 @@ mod tests {
     }
 
     /// TPT `ElementNumbers.h` identifiers indexed by TPT id, followed by the
-    /// mod's own 44 identifiers (`PT_FNTC ..= PT_MGNT`). Slot 146 is the removed
-    /// `disabler()` placeholder; the array is a name set, not index-aligned.
-    const TPT_ELEMENT_IDENTIFIERS: [&str; 240] = [
+    /// mod's own 44 identifiers (`PT_FNTC ..= PT_MGNT`) and the port's `BISM`.
+    /// Slot 146 is the removed `disabler()` placeholder; the array is a name
+    /// set, not index-aligned.
+    const TPT_ELEMENT_IDENTIFIERS: [&str; 241] = [
         "DEFAULT_PT_NONE",   // 0
         "DEFAULT_PT_DUST",   // 1
         "DEFAULT_PT_WATR",   // 2
@@ -1390,12 +1399,14 @@ mod tests {
         "DEFAULT_PT_PCON",   // mod 236
         "DEFAULT_PT_MISL",   // mod 237
         "DEFAULT_PT_MGNT",   // mod 238
+        "DEFAULT_PT_BISM",   // port 239
     ];
 
     /// Every TPT element id (`0..=195`, minus the removed `disabler()` slot
-    /// 146) and every mod element (`PT_FNTC ..= PT_MGNT`) resolves to a
-    /// definition, and no definition claims an unknown identifier. This keeps
-    /// the element menu a 1:1 superset of TPT's plus the mod's additions.
+    /// 146), every mod element (`PT_FNTC ..= PT_MGNT`) and the port's `BISM`
+    /// resolves to a definition, and no definition claims an unknown
+    /// identifier. This keeps the element menu a 1:1 superset of TPT's plus the
+    /// mod's and the port's additions.
     #[test]
     fn every_tpt_element_id_has_a_definition() {
         let reg = ElementRegistry::new_default();

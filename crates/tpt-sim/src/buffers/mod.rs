@@ -389,6 +389,12 @@ pub struct SimBuffers {
     /// One-word live-particle counter, reduced on the device by
     /// [`crate::live_count`] so the HUD never reads `part_ty` back.
     pub gpu_live_count: Handle,
+    /// Rigid-crystal spawn requests written by the `BISM` reaction pass:
+    /// `[write_seq, (x, y, radius, temp_bits) * CRYSTAL_REQUEST_CAP]`. The
+    /// device never reads it back into the simulation; [`crate::crystal_spawn`]
+    /// polls it every few frames so a slow-cooling bismuth melt can grow a
+    /// pixel-cluster rigid body.
+    pub gpu_crystal_requests: Handle,
     /// One-word gate for the wire `set_emap` closure: set by the parallel
     /// [`crate::move_kernel::emap_gate_kernel`] when an uncharged wire span sits
     /// next to charged wire, and consumed (and cleared) by the single-threaded
@@ -465,6 +471,10 @@ pub struct SimBuffers {
 
     pub rigid_bodies: Vec<RigidBody2D>,
     pub(crate) pending_live_count: Option<crate::live_count::PendingLiveCount>,
+    /// In-flight async read of [`Self::gpu_crystal_requests`].
+    pub(crate) pending_crystal_requests: Option<crate::crystal_spawn::PendingCrystalRead>,
+    /// Highest [`Self::gpu_crystal_requests`] sequence the host has consumed.
+    pub(crate) crystal_seq_seen: u32,
     pub next_rigid_id: u32,
 }
 

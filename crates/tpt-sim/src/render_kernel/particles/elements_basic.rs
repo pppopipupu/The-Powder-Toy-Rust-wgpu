@@ -18,6 +18,260 @@ pub(crate) fn lava_graphics(life: i32) -> (f32, f32, f32) {
     (r, g, b)
 }
 
+/// Triangle wave with period `1`: `0 -> 1 -> 0`.
+///
+/// Cheap smooth oscillation for the device IR (which has no `cos`): the crystal
+/// fields are built from crossing waves of it, so no lookup table is needed.
+#[cube]
+fn tri_wave(p: f32) -> f32 {
+    let f = p - p.floor();
+    let mut v = f * 2.0f32;
+    if f >= 0.5f32 {
+        v = 2.0f32 - f * 2.0f32;
+    }
+    v
+}
+
+/// Port addition: the `Bi2O3` film palette at phase `u`, in cycles (unbounded).
+///
+/// Interference repeats with the optical path: every extra half-wave walks the
+/// palette once more, so a thick film keeps cycling instead of settling on one
+/// dull tone. The ramp is a full-saturation hue wheel (red, yellow, green,
+/// cyan, blue, magenta) shifted so a growing film sweeps gold, magenta, cyan
+/// and blue on its way up, and it never browns out.
+#[cube]
+fn bism_film(u: f32) -> (f32, f32, f32) {
+    // Six sectors of a full-saturation wheel; the 0.08 offset starts the sweep
+    // at the warm gold the thinnest films show.
+    let wheel = fract01(u + 0.08f32) * 6.0f32;
+    let sector = wheel.floor();
+    let f = wheel - sector;
+    let down = 1.0f32 - f;
+    let mut rr = 0.0f32;
+    let mut gg = 0.0f32;
+    let mut bb = 0.0f32;
+    if sector == 1.0f32 {
+        rr = down;
+        gg = 1.0f32;
+    } else if sector == 2.0f32 {
+        gg = 1.0f32;
+        bb = f;
+    } else if sector == 3.0f32 {
+        gg = down;
+        bb = 1.0f32;
+    } else if sector == 4.0f32 {
+        rr = f;
+        bb = 1.0f32;
+    } else if sector >= 5.0f32 {
+        rr = 1.0f32;
+        bb = down;
+    } else {
+        rr = 1.0f32;
+        gg = f;
+    }
+    // Keep every channel off the floor: a film pixel glows, it never reads as a
+    // hole punched in the metal.
+    (
+        40.0f32 + rr * 215.0f32,
+        40.0f32 + gg * 215.0f32,
+        40.0f32 + bb * 215.0f32,
+    )
+}
+
+/// `u mod 1`, with negatives shifted into `0.0..1.0`.
+///
+/// The film phase is unbounded (a thick film keeps accumulating cycles), so the
+/// palette indexes it here rather than at every call site.
+#[cube]
+fn fract01(u: f32) -> f32 {
+    let mut f = u - u.floor();
+    if f < 0.0f32 {
+        f += 1.0f32;
+    }
+    f
+}
+
+/// Port addition: bismuth's oxide-film surface.
+///
+/// Real bismuth grows as terraced hopper crystals: a stack of plateaus, each
+/// carrying a thin film whose interference colour follows its thickness, with a
+/// bright specular edge and a shadowed step where one plateau rises above the
+/// next. Three layers over the pixel grid rebuild that:
+///
+/// * a low-frequency **tint field** (two crossing waves plus a per-face nudge)
+///   sets the interference hue — a few large, smooth colour regions across a
+///   block, never a per-cell grid or a stripe pattern;
+/// * **coarse growth plates** (a couple of large plateaus per block) whose
+///   boundaries get the boldest specular seam and a shadow;
+/// * **fine terraces** cut inside each crystal face along that face's own
+///   direction, each contour carrying a specular line, a bevel and a shadow.
+///
+/// The film tint is mixed into the silver body at a little over half strength,
+/// so the surface stays an iridescent metal rather than rainbow paint. The fancy
+/// preset adds a very slow thickness drift, one broad travelling specular sweep
+/// and sparse white glints. The element still sets no `PMODE_GLOW` /
+/// `PMODE_FLARE`: both scatter the colour into a white halo and would erase
+/// exactly this pattern.
+#[cube]
+// The kernels keep the explicit comparisons the device IR lowers; clippy's
+// range-contains rewrite is a host-only construct.
+#[allow(clippy::manual_range_contains)]
+pub(crate) fn bism_graphics(
+    base: (f32, f32, f32),
+    ctype: u32,
+    tmp: i32,
+    pid: u32,
+    px: i32,
+    py: i32,
+    tick: u32,
+    fancy: u32,
+) -> (f32, f32, f32) {
+    let ct = clampi(ctype as i32, 0, 100) as f32;
+    let fx = px as f32;
+    let fy = py as f32;
+    // One crystal face per 16 px cell (`BISM_GRAIN_SHIFT`); its hash only
+    // offsets the tints a little, it never draws a border.
+    let cell_x = (px / 16) as u32;
+    let cell_y = (py / 16) as u32;
+    let cell = (cell_x * 73_856_093u32)
+        ^ (cell_y * 19_349_663u32)
+        ^ (((tmp & 7i32) as u32) * 0x9E37_79B9u32);
+    let face_salt = hash01(cell ^ 0x85EB_CA6Bu32);
+
+    // Tint field in interference cycles: film thickness plus two slow waves, so
+    // the colour drifts across a block in large soft regions.
+    let tint_a = tri_wave(fx * 0.0125f32 + fy * 0.0075f32 + 0.17f32);
+    let tint_b = tri_wave(fx * 0.0055f32 - fy * 0.0115f32 + 0.63f32);
+    let mut hue = ct * 0.050f32 + tint_a * 0.38f32 + tint_b * 0.28f32;
+    // The face only nudges the tint: a bigger step drew a visible 16 px grid.
+    hue += (face_salt - 0.5f32) * 0.10f32;
+    if fancy != 0u32 {
+        // The film still creeps, very slowly, as it would in the dark.
+        hue += (tick as f32) * 0.0006f32;
+    }
+
+    // Coarse growth plates: a few large plateaus per block. Their boundaries are
+    // the strongest steps of a hopper crystal, so they get the boldest edge.
+    let plate_a = tri_wave(fx * 0.0065f32 + fy * 0.0105f32 + 0.31f32);
+    let plate_b = tri_wave(fx * 0.0125f32 - fy * 0.0045f32 + 0.77f32);
+    let mut plate_field = (plate_a * 0.9f32 + plate_b * 0.7f32) * 1.45f32;
+    if fancy != 0u32 {
+        plate_field += (tick as f32) * 0.0002f32;
+    }
+    let plate_lvl = plate_field.floor();
+    let plate_frac = plate_field - plate_lvl;
+    let mut plate_edge = 0.0f32;
+    if plate_frac < 0.09f32 {
+        plate_edge = 1.0f32;
+    }
+    let mut plate_shadow = 0.0f32;
+    if plate_frac >= 0.09f32 && plate_frac < 0.18f32 {
+        plate_shadow = 1.0f32;
+    }
+
+    // Fine terraces inside the plates: crossing slopes so the steps wind instead
+    // of running as straight stripes.
+    // Each face cuts its steps along its own direction, so the terrace lines
+    // re-orient face by face the way a crystal's plate boundaries do.
+    let step_dir_x = 0.030f32 + face_salt * 0.022f32;
+    let step_dir_y = 0.018f32 + (1.0f32 - face_salt) * 0.022f32;
+    let mut steps = tri_wave(fx * step_dir_x + fy * step_dir_y + face_salt * 2.0f32) * 0.9f32
+        + tri_wave(fx * 0.019f32 - fy * 0.033f32 + 0.40f32) * 0.35f32;
+    steps += ct * 0.035f32 + plate_lvl * 0.17f32;
+    if fancy != 0u32 {
+        steps += (tick as f32) * 0.0012f32;
+    }
+    let step_lvl = steps.floor();
+    let frac = steps - step_lvl;
+    let mut edge = 0.0f32;
+    if frac < 0.18f32 {
+        edge = 1.0f32;
+    }
+    let mut bevel = 0.0f32;
+    if frac >= 0.18f32 && frac < 0.30f32 {
+        bevel = 1.0f32;
+    }
+    let mut shadow = 0.0f32;
+    if frac >= 0.30f32 && frac < 0.38f32 {
+        shadow = 1.0f32;
+    }
+
+    // Every plate carries a slightly thicker film, which is what gives a hopper
+    // crystal its banded colour order.
+    hue += plate_lvl * 0.035f32 + step_lvl * 0.010f32;
+
+    // Metal body: bright silver with a per-face brightness, a per-plate level
+    // and a soft bevel across each terrace; the step shadows darken it.
+    let mut shade = 0.94f32
+        + (face_salt - 0.5f32) * 0.05f32
+        + (plate_lvl - 1.0f32) * 0.040f32
+        + (frac - 0.5f32) * 0.09f32;
+    shade *= 1.0f32 - (shadow * 0.08f32 + plate_shadow * 0.07f32);
+    shade = clampf(shade, 0.70f32, 1.12f32);
+    let mr = base.0 * shade + 2.0f32;
+    let mg = base.1 * shade + 1.0f32;
+    let mb = base.2 * shade + 1.0f32;
+    let mut r = mr;
+    let mut g = mg;
+    let mut b = mb;
+
+    if ct > 0.0f32 {
+        let film = bism_film(hue);
+        // A real `Bi2O3` film is thin: at most 55% tint over the bright metal.
+        let t = clampf(ct * 0.07f32, 0.0f32, 1.0f32) * 0.55f32;
+        let gloss = 0.88f32 + 0.12f32 * shade;
+        r = mr * (1.0f32 - t) + film.0 * t * gloss;
+        g = mg * (1.0f32 - t) + film.1 * t * gloss;
+        b = mb * (1.0f32 - t) + film.2 * t * gloss;
+        // Specular lines: the fine terrace edge, its bevel, and the bolder plate
+        // boundary on top.
+        let spec = edge * (30.0f32 + 22.0f32 * shade)
+            + bevel * 10.0f32
+            + plate_edge * (46.0f32 + 22.0f32 * shade);
+        r += spec;
+        g += spec * 0.97f32;
+        b += spec * 0.94f32;
+    } else {
+        // Bare metal keeps a weaker step highlight, so an unoxidised crystal
+        // still shows its terraces.
+        let spec = edge * (14.0f32 + 8.0f32 * shade)
+            + bevel * 5.0f32
+            + plate_edge * (20.0f32 + 10.0f32 * shade);
+        r += spec;
+        g += spec * 0.97f32;
+        b += spec * 0.94f32;
+    }
+
+    if fancy != 0u32 {
+        // Broad specular sweep: polished metal shows one soft highlight band
+        // that travels across the surface.
+        let sheen = tri_wave(fx * 0.0021f32 + fy * 0.0013f32 + 0.10f32);
+        let lift = sheen * sheen * 20.0f32;
+        r += lift * 0.85f32;
+        g += lift * 0.90f32;
+        b += lift;
+        // Sparse white glints: a couple of percent of the metal catches the
+        // light on any one frame.
+        if hash01(pid ^ (tick * 97u32)) > 0.975f32 {
+            r += 44.0f32;
+            g += 41.0f32;
+            b += 38.0f32;
+        }
+    }
+    (r, g, b)
+}
+
+/// Port addition: molten bismuth reads as a pale silvery metal instead of the
+/// `LAVA` red — real liquid bismuth is a bright silver melt.
+#[cube]
+pub(crate) fn bism_molten_graphics(life: i32) -> (f32, f32, f32) {
+    let l = clampf(life as f32, 0.0f32, 400.0f32);
+    let r = clampf(150.0f32 + l * 2.0f32, 0.0f32, 255.0f32);
+    let g = clampf(140.0f32 + l * 2.2f32, 0.0f32, 255.0f32);
+    let b = clampf(110.0f32 + l * 2.6f32, 0.0f32, 235.0f32);
+    (r, g, b)
+}
+
 /// TPT `PHOT::graphics`: three 12-bit wavelength bit fields.
 #[cube]
 pub(crate) fn photon_graphics(ctype: u32) -> (f32, f32, f32) {

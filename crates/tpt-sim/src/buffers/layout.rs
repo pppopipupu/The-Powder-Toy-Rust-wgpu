@@ -199,6 +199,7 @@ impl SimBuffers {
             // wireless & stickmen.
             gpu_free_slots: grid.free_slots,
             gpu_live_count: grid.live_count,
+            gpu_crystal_requests: grid.crystal_requests,
             gpu_emap_gate: grid.emap_gate,
             gpu_edit_points: grid.edit_points,
             gpu_edit_rolls: grid.edit_rolls,
@@ -230,6 +231,8 @@ impl SimBuffers {
 
             rigid_bodies: Vec::new(),
             pending_live_count: None,
+            pending_crystal_requests: None,
+            crystal_seq_seen: 0,
             next_rigid_id: 0,
         };
 
@@ -419,6 +422,8 @@ impl SimBuffers {
         self.gpu_maps_dirty = false;
         self.gpu_air_dirty = false;
         self.pending_live_count = None;
+        self.pending_crystal_requests = None;
+        self.crystal_seq_seen = 0;
         self.gpu_spawn_used = false;
     }
 
@@ -546,6 +551,8 @@ impl SimBuffers {
         let free_words = Self::GPU_SPAWN_COUNT + 2;
         self.gpu_free_slots = alloc_zeroed(&self.client, free_words);
         self.gpu_live_count = alloc_zeroed(&self.client, 1);
+        self.gpu_crystal_requests =
+            alloc_zeroed(&self.client, crate::crystal_spawn::CRYSTAL_REQUEST_WORDS);
         self.gpu_emap_gate = alloc_zeroed(&self.client, 1);
         self.gpu_edit_points = alloc_zeroed(&self.client, Self::EDIT_POINT_CAPACITY);
         self.gpu_edit_rolls = alloc_zeroed(&self.client, Self::tool_rolls_capacity());
@@ -702,6 +709,19 @@ impl SimBuffers {
         self.move_tables_stale = true;
     }
 
+    /// Drops any in-flight crystal-request read and zeroes the device ring.
+    ///
+    /// Called from [`SimBuffers::reset_all`]: a request queued before a scene
+    /// reset must not grow a rigid body inside the fresh scene.
+    pub(crate) fn reset_crystal_requests(&mut self) {
+        self.pending_crystal_requests = None;
+        self.crystal_seq_seen = 0;
+        self.client.write(
+            &self.gpu_crystal_requests,
+            Bytes::from_elems(vec![0u32; crate::crystal_spawn::CRYSTAL_REQUEST_WORDS]),
+        );
+    }
+
     /// Push the current host copies of the element tables to the device.
     pub fn upload_element_tables(&mut self) {
         if !self.elem_props_host.is_empty() {
@@ -820,6 +840,7 @@ struct GridHandles {
     water_winner: Handle,
     free_slots: Handle,
     live_count: Handle,
+    crystal_requests: Handle,
     emap_gate: Handle,
     edit_points: Handle,
     edit_rolls: Handle,
@@ -886,6 +907,7 @@ impl GridHandles {
             water_winner: client.empty(pixel_bytes),
             free_slots: alloc_zeroed(client, SimBuffers::GPU_SPAWN_COUNT + 2),
             live_count: alloc_zeroed(client, 1),
+            crystal_requests: alloc_zeroed(client, crate::crystal_spawn::CRYSTAL_REQUEST_WORDS),
             emap_gate: alloc_zeroed(client, 1),
             edit_points: alloc_zeroed(client, SimBuffers::EDIT_POINT_CAPACITY),
             edit_rolls: alloc_zeroed(client, SimBuffers::tool_rolls_capacity()),

@@ -1,10 +1,14 @@
 //! Palette, colour helpers, element/tool naming and shared widgets.
 
-use egui::{Color32, CornerRadius, Frame, Key, Margin, RichText, Stroke, Ui, vec2};
+use egui::{
+    Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke,
+    StrokeKind, Ui, vec2,
+};
 use tpt_core::commands::{DecoMode, RigidSpawnShape, SimToolKind};
 use tpt_core::constants::{
     COLOUR_DEFAULT, COLOUR_DEST, COLOUR_HEAT, COLOUR_LIFE, DISPLAY_AIRH, DISPLAY_AIRP,
-    DISPLAY_AIRV, DISPLAY_AIRW, DISPLAY_EFFE, MAX_TEMP, MIN_TEMP, RENDER_BASC, RENDER_EFFE,
+    DISPLAY_AIRV, DISPLAY_AIRW, DISPLAY_EFFE, MAX_TEMP, MIN_TEMP, PT_BISM, RENDER_BASC,
+    RENDER_EFFE,
 };
 use tpt_core::elements::ElementDef;
 use tpt_core::particle::SimulationConfig;
@@ -421,6 +425,41 @@ pub(super) fn element_button(
     description: &str,
     selected: bool,
 ) -> egui::Response {
+    if definition.id == PT_BISM {
+        // Port addition: a flat chip cannot show an iridescent oxide film, so
+        // `BISM` is painted by hand with the film's own colour ramp. Every
+        // other element keeps the cheap `Button` path below.
+        let (rect, _) = ui.allocate_exact_size(vec2(76.0, 24.0), Sense::hover());
+        let response = ui.interact(
+            rect,
+            ui.scope_id().with(("bism_chip", definition.id)),
+            Sense::click(),
+        );
+        paint_bism_swatch(ui.painter(), rect);
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(4), Color32::from_white_alpha(24));
+        }
+        if selected {
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(4),
+                Stroke::new(2.0, Color32::WHITE),
+                StrokeKind::Inside,
+            );
+        }
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            &definition.name,
+            FontId::proportional(13.0),
+            Color32::from_rgb(14, 14, 18),
+        );
+        return response.on_hover_ui(|ui| {
+            ui.label(RichText::new(&definition.name).strong());
+            ui.label(description);
+        });
+    }
     let background = element_color(definition.colour);
     let text = RichText::new(&definition.name)
         .color(contrasting_text(background))
@@ -436,6 +475,70 @@ pub(super) fn element_button(
         ui.label(RichText::new(&definition.name).strong());
         ui.label(description);
     })
+}
+
+/// Iridescent facets of `BISM`, in the order the shader's film palette cycles.
+///
+/// Host-side swatch colours, not a mirror of the kernel formula: the chip only
+/// has to advertise the interference sequence. They are pastel on purpose, the
+/// same way the render pass tints bright metal instead of painting it
+/// (`render_kernel/particles/elements_basic.rs`).
+const BISM_SWATCH: [Color32; 6] = [
+    Color32::from_rgb(255, 226, 156),
+    Color32::from_rgb(255, 186, 214),
+    Color32::from_rgb(206, 190, 255),
+    Color32::from_rgb(172, 206, 255),
+    Color32::from_rgb(168, 238, 232),
+    Color32::from_rgb(206, 246, 178),
+];
+
+/// Paints the iridescent palette chip of `BISM`.
+///
+/// Port addition: TPT paints every chip with the element's flat `Colour`, but
+/// `BISM`'s identity is its oxide film, so its chip runs the interference
+/// sequence the render pass produces instead of the silver base colour.
+pub(super) fn paint_bism_swatch(painter: &egui::Painter, rect: Rect) {
+    // Bands instead of a mesh: at chip size the step between two bands is
+    // below one colour level, so the ramp reads as continuous.
+    let bands = 18u32;
+    let width = rect.width() / bands as f32;
+    for i in 0..bands {
+        let t = (i as f32 / bands as f32) * BISM_SWATCH.len() as f32;
+        let first = BISM_SWATCH[(t as usize) % BISM_SWATCH.len()];
+        let second = BISM_SWATCH[(t as usize + 1) % BISM_SWATCH.len()];
+        let f = t - t.floor();
+        let mixed = Color32::from_rgb(
+            (first.r() as f32 + (second.r() as f32 - first.r() as f32) * f) as u8,
+            (first.g() as f32 + (second.g() as f32 - first.g() as f32) * f) as u8,
+            (first.b() as f32 + (second.b() as f32 - first.b() as f32) * f) as u8,
+        );
+        painter.rect_filled(
+            Rect::from_min_size(
+                egui::pos2(rect.left() + i as f32 * width, rect.top()),
+                vec2(width + 0.5, rect.height()),
+            ),
+            0.0,
+            mixed,
+        );
+    }
+    // Metallic gloss: the upper half of the chip catches more light, which is
+    // what makes the pastel bands read as a polished surface.
+    painter.rect_filled(
+        Rect::from_min_size(rect.min, vec2(rect.width(), rect.height() * 0.45)),
+        CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        },
+        Color32::from_white_alpha(46),
+    );
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(4),
+        Stroke::new(1.0, Color32::from_rgb(16, 17, 21)),
+        StrokeKind::Inside,
+    );
 }
 
 /// Wall / sim-tool / rigid-body button with a solid background colour.
@@ -584,8 +687,14 @@ mod tests {
             ]
         );
         // Everything else stays visible.
-        assert!(menu_visible(registry.get(tpt_core::constants::PT_DUST), &config));
-        assert!(menu_visible(registry.get(tpt_core::constants::PT_WATR), &config));
+        assert!(menu_visible(
+            registry.get(tpt_core::constants::PT_DUST),
+            &config
+        ));
+        assert!(menu_visible(
+            registry.get(tpt_core::constants::PT_WATR),
+            &config
+        ));
     }
 
     /// The mod-element switch hides exactly the Cracker1000 appendix: every id

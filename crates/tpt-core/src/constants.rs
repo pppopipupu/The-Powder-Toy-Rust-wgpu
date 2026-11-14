@@ -560,6 +560,24 @@ pub const PT_MISL: u32 = 237;
 /// MGNT (mod id 238, `MGNT.cpp`).
 pub const PT_MGNT: u32 = 238;
 
+// Port additions
+//
+// Not part of TPT or of the Cracker1000 appendix. They are appended above
+// `PT_MGNT` so every reference / mod id stays pinned for saves and tests, and
+// they stay outside `is_mod_element`, so `mod_elements_enabled` never hides
+// them.
+
+/// BISM (port addition). Bismuth: silvery metal with an iridescent oxide film.
+pub const PT_BISM: u32 = 239;
+
+/// Coarse cell size, as a log2 pixel shift, that seeds a `BISM` crystal grain
+/// (`tmp`): every particle in the same `1 << BISM_GRAIN_SHIFT` square starts
+/// with the same grain. The cell is wider than a single brush pass so a
+/// tarnished surface reads as a handful of crystal faces, not as per-pixel
+/// colour noise or a fine mosaic, and a growing crystal inherits the grain
+/// instead of re-hashing it.
+pub const BISM_GRAIN_SHIFT: i32 = 4;
+
 /// Whether `ty` is one of the 44 elements the Cracker1000 mod appends to the
 /// reference element table (`PT_FNTC ..= PT_MGNT`).
 ///
@@ -571,11 +589,11 @@ pub fn is_mod_element(ty: u32) -> bool {
     (PT_FNTC..=PT_MGNT).contains(&ty)
 }
 
-/// Number of built-in element definitions (`PT_NONE ..= PT_MGNT`).
+/// Number of built-in element definitions (`PT_NONE ..= PT_BISM`).
 ///
 /// Derived from the last element id so appending a definition only needs its
 /// `PT_*` constant (and a table row).
-pub const BUILTIN_ELEMENT_COUNT: usize = PT_MGNT as usize + 1;
+pub const BUILTIN_ELEMENT_COUNT: usize = PT_BISM as usize + 1;
 
 // Built-in element IDs must fit inside the 9-bit type field of a packed pmap.
 const _: () = assert!(BUILTIN_ELEMENT_COUNT <= PT_NUM);
@@ -820,8 +838,13 @@ mod tests {
         assert!(!is_mod_element(PT_SEED));
         assert!(is_mod_element(PT_FNTC));
         assert!(is_mod_element(PT_MGNT));
-        assert!(!is_mod_element(PT_MGNT + 1));
+        // The port's own additions sit above the mod range and are never
+        // treated as mod elements.
+        assert!(!is_mod_element(PT_BISM));
         assert_eq!(PT_MGNT - PT_FNTC + 1, 44);
-        assert_eq!(PT_MGNT as usize + 1, BUILTIN_ELEMENT_COUNT);
+        assert_eq!(PT_BISM as usize + 1, BUILTIN_ELEMENT_COUNT);
+        // The extra built-in still leaves the documented sixteen custom slots.
+        assert_eq!(PT_NUM - BUILTIN_ELEMENT_COUNT, 16);
+        assert_eq!(PT_NUM, 256);
     }
 }

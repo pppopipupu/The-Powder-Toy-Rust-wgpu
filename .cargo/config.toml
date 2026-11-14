@@ -3,6 +3,17 @@
 # `$CARGO_HOME/config.toml`, which is where a given machine keeps its choice of
 # compiler. Nothing in this file affects MSVC, Linux or macOS builds.
 
+[env]
+# CubeCL spawns a device-server thread per GPU (its name starts with `DS`) and
+# compiles every kernel there with `std::thread::Builder::new()`, i.e. with the
+# default 2 MiB stack. The debug builds of naga and of CubeCL's WGSL emitter
+# recurse deep enough on the particle render kernel to overflow it
+# (`thread 'DSD-5-0' has overflowed its stack`, reproduced on a clean checkout),
+# while release frames fit. Raising the default stack for the processes cargo
+# runs keeps debug builds and the GPU test suite working; release never needed
+# the headroom.
+RUST_MIN_STACK = "16777216"
+
 [target.x86_64-pc-windows-gnu]
 # CubeCL (through pliron) discovers every shader/type-interface implementation
 # with `linkme` distributed slices. On COFF, `#[used]` is expressed as a

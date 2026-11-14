@@ -43,20 +43,13 @@ tpt-sim = { path = "crates/tpt-sim" }
 tpt-save = { path = "crates/tpt-save" }
 tpt-lua = { path = "crates/tpt-lua" }
 
-# Keep `target/` small: the GPU stack (wgpu/cubecl/turso) is where the DWARF
-# bulk lives, and this project debugs through GPU error messages and the
-# headless smoke run rather than a Rust stepper. Workspace crates keep line
-# tables so a panic backtrace still points at a file and line.
+# No debug info in any profile: DWARF is what made `target/` tens of
+# gigabytes, and this project debugs through GPU error messages and logs rather
+# than a Rust stepper. Panic backtraces keep symbol names, without line tables.
 [profile.dev]
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
 debug = false
 
 [profile.test]
-debug = "line-tables-only"
-
-[profile.test.package."*"]
 debug = false
 
 [profile.release]

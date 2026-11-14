@@ -358,8 +358,14 @@ mod tests {
         assert_eq!(STAGE_COLD_QUARTZ, 0x0100_0000);
         assert_eq!(STAGE_COLD, 0x0200_0000);
         assert_eq!(STAGE_HOT, 0x0400_0000);
-        // Every element id fits in the low byte of the snapshot word.
-        assert!(PT_NUM <= STAGE_TY as usize, "PT_NUM must fit in one byte");
+        // The stage word stores the element id in its low byte, so the
+        // highest allocatable id (`PT_NUM - 1`) must fit; `PT_NUM` itself is a
+        // count and may be 256. The workspace assert `PT_NUM <= 256` in
+        // `constants.rs` is what keeps the id below 256.
+        assert!(
+            PT_NUM - 1 <= STAGE_TY as usize,
+            "element ids must fit in one byte"
+        );
     }
 
     /// Host mirror of the kernel's `heat_bits`, pinning the thresholds.

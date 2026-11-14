@@ -5398,7 +5398,6 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "bzip2",
- "cubecl",
  "mlua",
  "png",
  "serde",
@@ -5413,8 +5412,6 @@ name = "tpt-save"
 version = "0.1.0"
 dependencies = [
  "bincode",
- "cubecl",
- "cubecl-runtime",
  "flate2",
  "serde",
  "tpt-core",
@@ -5431,10 +5428,8 @@ dependencies = [
  "cubecl-runtime",
  "cubecl-wgpu",
  "glam",
- "pollster",
  "serde",
  "tpt-core",
- "wgpu",
 ]
 
 [[package]]

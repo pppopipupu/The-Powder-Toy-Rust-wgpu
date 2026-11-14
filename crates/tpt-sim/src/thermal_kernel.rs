@@ -241,6 +241,9 @@ pt_u32!(PT_ELEC_U32, PT_ELEC);
 pt_u32!(PT_DEUT_U32, PT_DEUT);
 pt_u32!(PT_DSTW_U32, PT_DSTW);
 pt_u32!(PT_WATR_U32, PT_WATR);
+// Port addition: the low-temperature `LAVA` case leaves bismuth's melt to
+// `bism_molten_update` (see the freeze guard below).
+pt_u32!(PT_BISM_U32, PT_BISM);
 pt_u32!(PT_SALT_U32, PT_SALT);
 pt_u32!(PT_GAS_U32, PT_GAS);
 pt_u32!(PT_OIL_U32, PT_OIL);
@@ -1061,7 +1064,13 @@ pub fn phase_transition_kernel(
                                     } else if c_high_trans == PT_LAVA as i32
                                         || new_ctype == PT_HEAC_U32
                                     {
-                                        if pt < c_high {
+                                        // Port addition: `LAVA(BISM)` solidifies
+                                        // in `bism_molten_update`, where it
+                                        // grows crystals at its own melting
+                                        // point; freezing it here would snap
+                                        // the whole pool into a plain metal
+                                        // block within one tick.
+                                        if pt < c_high && new_ctype != PT_BISM_U32 {
                                             freeze = 1u32;
                                         }
                                     } else if pt < LAVA_FREEZE_K {

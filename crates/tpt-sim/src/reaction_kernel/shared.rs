@@ -420,6 +420,10 @@ const PT_UVRD_U32: u32 = 225;
 const PT_BFLM_U32: u32 = 229;
 const PT_ALMP_U32: u32 = 233;
 const PT_MISL_U32: u32 = 237;
+/// Port addition: the bismuth `Create` hook seeds the crystal grain.
+const PT_BISM_U32: u32 = 239;
+/// `BISM_GRAIN_SHIFT` mirrored: the hook shifts the spawn coordinate by it.
+const _: () = assert!(BISM_GRAIN_SHIFT == 4);
 const _: () = assert!(
     PT_CLNT == 196
         && PT_LED == 197
@@ -432,6 +436,7 @@ const _: () = assert!(
         && PT_BFLM == 229
         && PT_ALMP == 233
         && PT_MISL == 237
+        && PT_BISM == 239
 );
 /// `PT_SEED`; the create hook seeds its genome (`SEED.cpp:254-275`).
 const PT_SEED_U32: u32 = 194;
@@ -832,6 +837,14 @@ fn create_fields_kernel(
                 } else if ty == PT_MISL_U32 {
                     // `MISL.cpp:148-152`: target x in 1..=610.
                     part_tmp[s] = 1i32 + (roll % 610u32) as i32;
+                } else if ty == PT_BISM_U32 {
+                    // Port addition: the crystal grain `0..=7`, hashed per
+                    // `1 << BISM_GRAIN_SHIFT` cell (mirrors
+                    // `SimBuffers::run_create_hook`).
+                    let cx = create_queue[base + CR_X as usize] >> 4u32;
+                    let cy = create_queue[base + CR_Y as usize] >> 4u32;
+                    let g = hash_u32(mix_index(cx, mix_index(cy, 0x8B15_0001u32)));
+                    part_tmp[s] = (g % 8u32) as i32;
                 }
             }
             if (mask & CR_SET_TMP2) == 0u32 {

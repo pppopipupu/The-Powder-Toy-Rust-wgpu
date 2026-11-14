@@ -44,9 +44,10 @@ use crate::buffers::SimBuffers;
 ///
 /// The reference rolls `rng.between(1, (1 << PMAPBITS) - 1)` over the 511
 /// `pmap` id values and then rejects everything `>= 253`, so roughly half its
-/// rolls never convert. The port rolls the populated id range directly; ids
-/// `239..=252` do not exist, `PT_MGNT` is the last registered element, so the
-/// `elemid < 253` test is subsumed by the roll range.
+/// rolls never convert. The port rolls the populated reference/mod id range
+/// directly: the ids past `PT_MGNT` hold no reference element, and the port's
+/// own `BISM` (`PT_BISM`) deliberately stays out of the roll so the reference
+/// mechanic never invents a port element.
 const ELEX_MAX_ID: i32 = 238;
 const _: () = assert!(PT_MGNT == ELEX_MAX_ID as u32);
 

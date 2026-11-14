@@ -34,6 +34,7 @@
 
 pub mod air_kernel;
 pub mod buffers;
+pub mod crystal_spawn;
 pub mod edit_kernel;
 pub mod flood_kernel;
 pub mod gol_kernel;
@@ -467,6 +468,11 @@ impl SimulationEngine {
         if self.frame_count.is_multiple_of(30) {
             live_count::start_live_count_async(&mut self.bufs);
         }
+
+        // Bismuth melt crystallisation: the reaction kernel queues a rigid
+        // crystal request on the device, this drains it (bounded async slice)
+        // and spawns the body before the rigid pass below.
+        self.poll_bismuth_crystals();
 
         // Rigid bodies. The device owns the steady state: the host solver is
         // only invoked when the rigid body description changed (spawn /

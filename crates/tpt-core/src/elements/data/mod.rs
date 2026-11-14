@@ -16,6 +16,7 @@ pub(super) mod batch2;
 pub(super) mod batch2a;
 pub(super) mod batch2b;
 pub(super) mod batch2c;
+pub(super) mod bism;
 pub(super) mod energy;
 pub(super) mod gases;
 pub(super) mod liquids;

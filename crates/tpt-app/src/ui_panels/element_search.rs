@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::{Color32, Key, Modifiers, RichText, Stroke};
 use tpt_core::commands::RigidSpawnShape;
-use tpt_core::constants::{PT_NONE, WL_ERASE};
+use tpt_core::constants::{PT_BISM, PT_NONE, WL_ERASE};
 
 use crate::app_state::{
     AppScreen, AppState, GameMode, SelectedTool, pack_deco_colour, persist_tool_settings,
@@ -45,7 +45,7 @@ use super::bottom_bar::RIGID_MATERIALS;
 use super::shared::{
     DECO_TOOL_BUTTONS, GUI_TOOL_BUTTONS, SIM_TOOL_BUTTONS, TEXT_DIM, contrasting_text,
     deco_tool_colour, element_color, element_description, element_name, element_rgb, menu_visible,
-    rigid_shape_label, wall_description,
+    paint_bism_swatch, rigid_shape_label, wall_description,
 };
 use super::side_bar::category_label;
 
@@ -103,6 +103,8 @@ struct Row {
     description: String,
     /// Base colour of the tool's palette chip, `0x00RRGGBB`.
     colour: u32,
+    /// The chip shows an iridescent ramp instead of the flat colour (`BISM`).
+    iridescent: bool,
 }
 
 /// Opens the element search window.
@@ -212,10 +214,24 @@ pub(super) fn draw_element_search(ctx: &egui::Context, state: &mut AppState) {
                         let candidate = candidates[ranked[rank]];
                         let row = candidate.row(state);
                         let background = element_color(row.colour);
-                        let text = RichText::new(&row.name)
-                            .color(contrasting_text(background))
-                            .strong();
-                        let mut button = egui::Button::new(text).fill(background);
+                        let text_colour = if row.iridescent {
+                            Color32::from_rgb(14, 14, 18)
+                        } else {
+                            contrasting_text(background)
+                        };
+                        let text = RichText::new(&row.name).color(text_colour).strong();
+                        let row_rect = egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(ui.available_width(), ROW_HEIGHT),
+                        );
+                        if row.iridescent {
+                            paint_bism_swatch(ui.painter(), row_rect);
+                        }
+                        let mut button = if row.iridescent {
+                            egui::Button::new(text).fill(Color32::TRANSPARENT)
+                        } else {
+                            egui::Button::new(text).fill(background)
+                        };
                         if rank == search.selected {
                             button = button.stroke(Stroke::new(2.0, Color32::WHITE));
                         }
@@ -446,6 +462,7 @@ impl Candidate {
                     name: definition.name.clone(),
                     description: element_description(state, ty).to_string(),
                     colour: definition.colour,
+                    iridescent: ty == PT_BISM,
                 }
             }
             Self::Wall(id) => match state.engine.walls.iter().find(|wall| wall.id == id) {
@@ -453,11 +470,13 @@ impl Candidate {
                     name: wall.name.clone(),
                     description: wall_description(state, id).to_string(),
                     colour: wall.colour,
+                    iridescent: false,
                 },
                 None => Row {
                     name: t("tools.tool_wall_fallback").to_string(),
                     description: String::new(),
                     colour: 0x0080_8080,
+                    iridescent: false,
                 },
             },
             Self::Rigid { shape, elem_ty } => Row {
@@ -468,6 +487,7 @@ impl Candidate {
                 ),
                 description: t("bottom_bar.rigid_body_desc").to_string(),
                 colour: element_rgb(state, elem_ty),
+                iridescent: false,
             },
             Self::Named {
                 name,
@@ -478,6 +498,7 @@ impl Candidate {
                 name: name.to_string(),
                 description: description.to_string(),
                 colour,
+                iridescent: false,
             },
         }
     }

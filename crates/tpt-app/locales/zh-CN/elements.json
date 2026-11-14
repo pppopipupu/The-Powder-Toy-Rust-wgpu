@@ -237,5 +237,6 @@
   "DEFAULT_PT_PCON": "转换器的动力版本。通电时会将一切转化为它最先接触到的物质。请谨慎设置其 Ctype！",
   "DEFAULT_PT_MISL": "导弹，飞向目标坐标（tmp = X，tmp2 = Y）然后轰然爆炸。用 PSCN 激活。使用 MIST 工具更方便。",
   "DEFAULT_PT_MGNT": "强力电磁铁，通电时产生电磁场。可吸引或排斥某些金属或能量粒子。详见 WIKI。",
+  "DEFAULT_PT_BISM": "铋。表面氧化膜随 Ctype 增厚并呈虹彩色；271°C 熔化，熔体冷却时会结晶。",
   "DEFAULT_PT_NONE": "空白空间。无粒子。"
 }

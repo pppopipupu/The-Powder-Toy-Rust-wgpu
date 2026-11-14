@@ -14,7 +14,9 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::framebuffer::{add_px, blend_px};
-use super::particles::{effective_pixel_mode, glow_alpha, packed_at, particle_cola, particle_rgb};
+use super::particles::{
+    effective_pixel_mode, fancy_view, glow_alpha, packed_at, particle_cola, particle_rgb,
+};
 use super::{
     ELEM_COLA, ELEM_COLOUR, ELEM_HIGH_TEMP, ELEM_PIXEL_MODE, ELEM_PROPS, ELEM_WORDS, FX_GLOW,
     FX_PMBLUR, FX_PMGLOW, PMAP_ID_SHIFT, PMAP_TYPE_MASK, PMODE_BLOB, PMODE_BLUR, PMODE_FLAT,
@@ -98,10 +100,13 @@ fn blob_pixels(
                         part_life[nslot],
                         part_ctype[nslot],
                         npid,
+                        x,
+                        y,
                         part_dcolour[nslot],
                         colour_mode,
                         pretty_powder,
                         nmode,
+                        fancy_view(render_mode),
                         part_tmp[nslot],
                         part_tmp2[nslot],
                         part_tmp3[nslot],
@@ -291,10 +296,13 @@ fn glow_pixels(
                             part_life[nslot],
                             part_ctype[nslot],
                             npid,
+                            x,
+                            y,
                             part_dcolour[nslot],
                             colour_mode,
                             pretty_powder,
                             nmode,
+                            fancy_view(render_mode),
                             part_tmp[nslot],
                             part_tmp2[nslot],
                             part_tmp3[nslot],
@@ -414,10 +422,13 @@ fn blur_pixels(
                             part_life[nslot],
                             part_ctype[nslot],
                             npid,
+                            x,
+                            y,
                             part_dcolour[nslot],
                             colour_mode,
                             pretty_powder,
                             nmode,
+                            fancy_view(render_mode),
                             part_tmp[nslot],
                             part_tmp2[nslot],
                             part_tmp3[nslot],

@@ -68,6 +68,20 @@ pub(crate) fn render_mask(render_mode: u32) -> u32 {
     mask
 }
 
+/// `1` when the display settings enable the fancy effects, `0` otherwise.
+///
+/// The port's "fancy" preset is the only one with `RENDER_GLOW`
+/// (`SimulationConfig::render_mode`), so an element that wants a fancy-only
+/// colour effect can key on this without binding the whole render mask.
+#[cube]
+pub(crate) fn fancy_view(render_mode: u32) -> u32 {
+    let mut v = 0u32;
+    if (render_mode & RENDER_GLOW) != 0u32 {
+        v = 1u32;
+    }
+    v
+}
+
 /// Element `Graphics` `pixel_mode` overrides that read the particle fields.
 ///
 /// TPT evaluates these inside the element's own `Graphics` function, which

@@ -237,5 +237,6 @@
   "DEFAULT_PT_PCON": "Powered Converter. Converts everything into whatever it first touches when powered. Set its Ctype carefully!",
   "DEFAULT_PT_MISL": "Missile, flies to target coordinates (tmp = X, tmp2 = Y) and then goes booom. Activates with PSCN. Use MIST tool for ease.",
   "DEFAULT_PT_MGNT": "Strong electro magnet, creates EM fields when powered. Can attract/ repel certain metals or Energy particles. Read WIKI.",
+  "DEFAULT_PT_BISM": "Bismuth. Its oxide film thickens with ctype into iridescent colours; melts at 271 C and grows crystals as the melt cools.",
   "DEFAULT_PT_NONE": "Empty space. No particle."
 }

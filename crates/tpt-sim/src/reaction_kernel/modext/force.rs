@@ -1434,7 +1434,14 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
     }
     // `CEXP.cpp:70-74`: the armed run arms the rest of its 4-connected
     // component in the same frame.
-    launch_seed_scan(bufs, dims, FLOOD_FIELD_TMP2, CEXP_ARMED, CEXP_FLOOD, PT_CEXP);
+    launch_seed_scan(
+        bufs,
+        dims,
+        FLOOD_FIELD_TMP2,
+        CEXP_ARMED,
+        CEXP_FLOOD,
+        PT_CEXP,
+    );
     launch_drain(bufs, dims, FLOOD_MODE_TMP2, PT_CEXP, CEXP_FLOOD, 0i32);
     unsafe {
         cexp_blast_kernel::launch_unchecked(

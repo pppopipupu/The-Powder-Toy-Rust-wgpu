@@ -883,6 +883,16 @@ impl SimBuffers {
                 self.part_tmp3[id] = ((roll >> 14) & 0x7FFF) as i32;
                 self.part_tmp4[id] = ((roll >> 21) & 0x7FFF) as i32;
             }
+            // Port addition `BISM`: the crystal grain drives the faceted oxide
+            // shading (see `reaction_kernel::bism`). It is hashed per
+            // `1 << BISM_GRAIN_SHIFT` cell instead of per particle, so a
+            // painted block reads as a handful of crystal faces rather than
+            // 1 px noise.
+            PT_BISM => {
+                let cx = (x >> BISM_GRAIN_SHIFT) as u32;
+                let cy = (y >> BISM_GRAIN_SHIFT) as u32;
+                self.part_tmp[id] = (hash3(cx, cy, 0x8B15_0001) & 7) as i32;
+            }
             // The second element set (`PT_FNTC`..`PT_MGNT`, ids `195..=238`).
             // `CLNT.cpp:86-89`: the thermostat's cooling target, in Celsius.
             PT_CLNT => self.part_tmp[id] = 22,
@@ -1175,6 +1185,7 @@ impl SimBuffers {
         self.grav_mass_dirty = true;
         self.rigid_bodies.clear();
         self.next_rigid_id = 0;
+        self.reset_crystal_requests();
         self.mark_all_dirty();
     }
 }

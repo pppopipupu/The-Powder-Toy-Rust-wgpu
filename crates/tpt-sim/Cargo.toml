@@ -23,14 +23,3 @@ bytemuck = { workspace = true }
 serde = { workspace = true }
 glam = { workspace = true }
 
-[dev-dependencies]
-pollster = { workspace = true }
-wgpu = { workspace = true }
-
-[[test]]
-name = "gpu_voxel3d_tests"
-required-features = ["diagnostics"]
-
-[[test]]
-name = "gpu_voxel3d_render_tests"
-required-features = ["diagnostics"]

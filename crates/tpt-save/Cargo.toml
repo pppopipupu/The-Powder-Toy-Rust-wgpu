@@ -12,10 +12,3 @@ tpt-sim = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 flate2 = { workspace = true }
-
-[dev-dependencies]
-# The save layer is exercised against a real headless CubeCL/wgpu device, so the
-# integration tests need the runtime stack (the wgpu backend comes in through
-# `cubecl`'s workspace `wgpu` feature).
-cubecl = { workspace = true }
-cubecl-runtime = { workspace = true }

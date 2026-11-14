@@ -59,7 +59,7 @@ tpt-core --> (pure data and constants; no GPU, windowing or I/O dependencies)
 ## Lua Bridge
 
 - `LuaScriptingEngine` shares `Rc<RefCell<LuaBridgeState>>` with `'static` closures; `run_attached` installs the engine through an RAII guard and rejects re-entry.
-- Built-in elements are `0..BUILTIN_ELEMENT_COUNT`: the 195 reference ids then the 44 Cracker1000 mod ids (`195..239`). Custom Lua elements take `239..PT_NUM`. `elem.DEFAULT_PT_*` covers all 239 built-in names.
+- Built-in elements are `0..BUILTIN_ELEMENT_COUNT`: the 195 reference ids, the 44 Cracker1000 mod ids (`195..239`) and the port's `BISM` (239). Custom Lua elements take `240..PT_NUM`. `elem.DEFAULT_PT_*` covers all 240 built-in names.
 - `sim.signs` is a live proxy, never a copy: `#`, indexing, `new` and `delete` mutate `SimulationEngine::signs`.
 - `ren` toggles are `SimulationConfig` fields shared by scripts and UI; `separateThread` and `depth3d` stay documented no-ops.
 
@@ -92,13 +92,8 @@ cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets
 cargo build --release -p tpt-app
 cargo run --release -p tpt-app
-cargo run --release -p tpt-app -- --headless-smoke
-cargo run --release -p tpt-app -- --windowed-smoke 30
-cargo run --release -p tpt-app -- --voxel-windowed-smoke 5
-cargo run --release -p tpt-app -- --bench
 cargo test --workspace --release
-cargo test -p tpt-sim --test gpu_sim_tests
-cargo test -p tpt-app --bins
+smoke/run.sh
 ```
 
 Use release builds for GPU runs. A local build produces the Windows binary only.
@@ -110,15 +105,15 @@ and publishes `tpt-app-<tag>-<platform>` archives on a GitHub release.
 
 ## Testing
 
-- GPU integration: `crates/tpt-sim/tests/gpu_sim_tests.rs`, serialised by `GPU_LOCK`; covers movement, thermal/phase, reactions, rendering, rigid contacts, save, Lua and dispatch limits.
-- Save: `crates/tpt-save/tests/save_tests.rs`. Lua: `crates/tpt-lua/tests/lua_tests.rs`. 3D core: `crates/tpt-sim/tests/gpu_voxel3d_core_tests.rs`.
-- `tpt-app` is binary-only: use `cargo test -p tpt-app --bins`.
-- Smoke paths: `--headless-smoke`, `--windowed-smoke`, `--voxel-windowed-smoke`, `--bench`.
+- Only in-crate unit tests remain (`#[cfg(test)] mod tests`, `cargo test --workspace --release`); they are fast and need no GPU.
+- GPU behaviour is checked by running the binary, not by an integration suite. `smoke/` is a gitignored scratch directory for that: `smoke/run.sh [headless|windowed|voxel|bench]` builds the release binary and runs the matching smoke path (`--headless-smoke`, `--windowed-smoke 60`, `--voxel-windowed-smoke 5`, `--bench`). Drop throwaway probe code there too; nothing in it is committed.
+- `tpt-app` is binary-only: use `cargo test -p tpt-app --bins` for its unit tests.
 
 ## Runtime and Tooling
 
 - Toolchain: `rust-version = "1.99.1"`. No `rust-toolchain.toml` is committed, so a checkout builds with the host's default toolchain. This workstation's default is `stable-x86_64-pc-windows-gnu` and keeps its MinGW-w64 linker paths in `~/.cargo/config.toml`, never in the repository; CI builds `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` (`.github/workflows/release.yml`). Do not switch this workstation to `-msvc`: it has no Visual Studio Build Tools (`mlua` vendors Lua 5.4 and needs `cc`).
 - NEVER remove `-Wl,--no-gc-sections` from `.cargo/config.toml`: on `x86_64-pc-windows-gnu` GNU `ld` garbage-collects `linkme`'s kernel registry and every launch panics. MSVC (`/INCLUDE:` directives) and the ELF/Mach-O targets keep the registry without the flag, which is why CI does not carry it.
+- NEVER remove `[env] RUST_MIN_STACK` from `.cargo/config.toml`: CubeCL compiles kernels on its device-server thread with the default 2 MiB stack, and a debug build of naga overflows it on the particle render kernel (`thread 'DSD-5-0' has overflowed its stack`). Release frames fit; the variable only supplies debug builds and the GPU test suite with the headroom.
 - Keep `[profile.release]` at `lto = false` and `codegen-units = 16`; whole-program LTO and a single codegen unit make the CubeCL-heavy build disproportionately slow.
 - Workspace `cubecl*` dependencies use `default-features = false`; their defaults enable `persistence` and build the libSQL fork.
 - Initialize devices with `required_limits: adapter.limits()`.
