@@ -496,3 +496,62 @@ pub(super) fn resolve_pair_impulse(
     let clamped = clamp_velocity(vx, vy, omega);
     (clamped.0, clamped.1, clamped.2, jx, jy)
 }
+
+/// Manifold direction word of a swept contact face (`0=+x, 1=-x, 2=+y, 3=-y`).
+#[cube]
+pub(super) fn face_dir(nx: f32, ny: f32) -> u32 {
+    let mut dir = seed_u32(u32::reinterpret(nx), 0u32);
+    if nx < 0.0f32 {
+        dir = 1u32;
+    } else if ny > 0.0f32 {
+        dir = 2u32;
+    } else if ny < 0.0f32 {
+        dir = 3u32;
+    }
+    dir
+}
+
+/// Advance a body by one collision sub-step.
+///
+/// Returns `(pred_cm_x, pred_cm_y, pred_angle, new_vx, new_vy, new_omega, cos_a, sin_a)`.
+#[cube]
+pub(super) fn integrate_substep_step(
+    cmx: f32,
+    cmy: f32,
+    angle: f32,
+    mut vx: f32,
+    mut vy: f32,
+    mut omega: f32,
+    ax: f32,
+    ay: f32,
+    angular_acc: f32,
+    radius: f32,
+    substeps: u32,
+    frames: f32,
+) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
+    let sdt = frames / substeps as f32;
+    vx += ax * sdt;
+    vy += ay * sdt;
+    omega += angular_acc * sdt;
+    let linear_damp = 1.0f32 - 0.001f32 * sdt;
+    let angular_damp = 1.0f32 - 0.005f32 * sdt;
+    vx *= linear_damp;
+    vy *= linear_damp;
+    omega *= angular_damp;
+    let clamped = clamp_velocity(vx, vy, omega);
+    vx = clamped.0;
+    vy = clamped.1;
+    omega = clamped.2;
+    let sub_budget = substeps as f32 * 0.999f32 / frames;
+    let surface = clamp_surface_velocity(vx, vy, omega, radius, sub_budget);
+    vx = surface.0;
+    vy = surface.1;
+    omega = surface.2;
+
+    let pred_cm_x = cmx + vx * sdt;
+    let pred_cm_y = cmy + vy * sdt;
+    let pred_angle = wrap_angle(angle + omega * sdt);
+    let cos_a = pred_angle.cos();
+    let sin_a = pred_angle.sin();
+    (pred_cm_x, pred_cm_y, pred_angle, vx, vy, omega, cos_a, sin_a)
+}

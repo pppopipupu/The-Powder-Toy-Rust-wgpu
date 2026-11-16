@@ -20,30 +20,21 @@ pub struct RigidGpu {
     pub(super) bodies: Option<Handle>,
     pub(super) pixels: Option<Handle>,
     pub(super) claims: Option<Handle>,
-    /// Per-body contact manifolds: [`MANIFOLDS`] slots of [`M_STRIDE`] words
-    /// each. Every contact thread only touches its own body's row, so the
-    /// grouping is race-free; the manifold is flushed into the receiver's
-    /// fixed-point reaction words at the end of the pass.
-    pub(super) manifolds: Option<Handle>,
     pub(super) owner: Option<Handle>,
-    /// One *bit* per device pixel: set when the contact pass must visit it.
-    ///
-    /// The pass runs one thread per body, so every flag it reads costs a full
-    /// memory latency with no other warp to hide it behind. A packed bitmap
-    /// lets the scan skip 32 interior pixels per word instead of paying one
-    /// latency each: a solid 200x200 body has 800 surface pixels among 40 000,
-    /// so the sweep reads ~1 250 words rather than 40 000 words. Interior
-    /// pixels, whose eight neighbours are all body pixels, can never meet a
-    /// loose particle, so their bit stays clear.
+    /// One *bit* per device pixel: set when the pixel lies on the body surface.
     pub(super) surface: Option<Handle>,
+    /// Compacted per-body surface pixel indices (`surface_list[start .. start + B_SURFACE_COUNT]`).
+    ///
+    /// Built on upload and rebuilt in `prepare_geometry_kernel` whenever a
+    /// detachment marks `B_GEOM_DIRTY`. Allows `contact_pair_kernel` and
+    /// `contact_static_kernel` to iterate strictly over active surface pixels
+    /// in parallel across a workgroup without scanning interior pixels.
+    pub(super) surface_list: Option<Handle>,
+    /// Indirect dispatch counts `[x, y, z, pad]` written by
+    /// `broadphase_dispatch_kernel` for `CubeCount::Dynamic` launches.
+    pub(super) dispatch_counts: Option<Handle>,
     /// Three `f32` per device pixel: the air pressure / wind force and the
     /// torque contribution `prepare_forces_kernel` computed for it.
-    ///
-    /// `prepare_forces_kernel` fills the stage and `prepare_finish_kernel`
-    /// sums it in pixel order, exactly the order the
-    /// former in-line loop used, so the parallel gate stays bit-identical to
-    /// the sequential sum while a large body no longer pays one latency-bound
-    /// iteration per pixel on a single thread.
     pub(super) force_stage: Option<Handle>,
     pub(super) body_capacity: usize,
     pub(super) pixel_capacity: usize,
@@ -72,9 +63,10 @@ impl RigidGpu {
             bodies: None,
             pixels: None,
             claims: None,
-            manifolds: None,
             owner: None,
             surface: None,
+            surface_list: None,
+            dispatch_counts: None,
             force_stage: None,
             body_capacity: 0,
             pixel_capacity: 0,
@@ -95,9 +87,10 @@ impl RigidGpu {
         self.bodies = None;
         self.pixels = None;
         self.claims = None;
-        self.manifolds = None;
         self.owner = None;
         self.surface = None;
+        self.surface_list = None;
+        self.dispatch_counts = None;
         self.force_stage = None;
         self.body_capacity = 0;
         self.pixel_capacity = 0;
@@ -216,16 +209,19 @@ impl RigidGpu {
         while pixel_cap < pixels {
             pixel_cap *= 2;
         }
-        if body_cap != self.body_capacity || self.bodies.is_none() || self.manifolds.is_none() {
+        if body_cap != self.body_capacity || self.bodies.is_none() {
             self.body_capacity = body_cap;
             self.bodies = Some(client.empty(body_cap * B_STRIDE * 4));
-            self.manifolds = Some(client.empty(body_cap * MANIFOLDS * M_STRIDE * 4));
         }
-        if pixel_cap != self.pixel_capacity || self.pixels.is_none() {
+        if self.dispatch_counts.is_none() {
+            self.dispatch_counts = Some(client.empty(DISPATCH_SLOTS * DISPATCH_SLOT_WORDS * 4));
+        }
+        if pixel_cap != self.pixel_capacity || self.pixels.is_none() || self.surface_list.is_none() {
             self.pixel_capacity = pixel_cap;
             self.pixels = Some(client.empty(pixel_cap * P_STRIDE * 4));
             // Rewritten wholesale by `upload_from_host`.
             self.surface = Some(client.empty(pixel_cap.div_ceil(32) * 4));
+            self.surface_list = Some(client.empty(pixel_cap * 4));
             self.force_stage = Some(client.empty(pixel_cap * 3 * 4));
         }
     }
@@ -276,6 +272,7 @@ impl RigidGpu {
         let mut bodies = vec![0u32; self.body_capacity * B_STRIDE];
         let mut pixels = vec![0u32; self.pixel_capacity * P_STRIDE];
         let mut surface = vec![0u32; self.pixel_capacity.div_ceil(32)];
+        let mut surface_list = vec![0u32; self.pixel_capacity];
 
         // Map each body pixel back to the particle slot the host initialiser
         // reserved for it. Matching by cell is exactly what the host sync pass
@@ -285,6 +282,7 @@ impl RigidGpu {
 
         for (bi, body) in bufs.rigid_bodies.iter().enumerate() {
             let bb = bi * B_STRIDE;
+            let (sin_a, cos_a) = body.angle.sin_cos();
             bodies[bb + B_ID] = body.id;
             bodies[bb + B_FLAGS] = if body.active { BF_ACTIVE } else { 0 };
             bodies[bb + B_PIXEL_START] = start as u32;
@@ -323,6 +321,11 @@ impl RigidGpu {
             // The pixel list is new, so the device mass / inertia cache must
             // be rebuilt by the next `prepare_geometry_kernel`.
             bodies[bb + B_GEOM_DIRTY] = 1;
+            bodies[bb + B_COS_A] = cos_a.to_bits();
+            bodies[bb + B_SIN_A] = sin_a.to_bits();
+            bodies[bb + B_PREV_COS_A] = cos_a.to_bits();
+            bodies[bb + B_PREV_SIN_A] = sin_a.to_bits();
+            bodies[bb + B_HAS_PAIR] = 0;
 
             // Body-local neighbourhood, used by the contact pass to skip the
             // pixels a loose particle can never reach. The indices are stored
@@ -405,6 +408,17 @@ impl RigidGpu {
                     }
                 }
             }
+
+            // Compact active surface pixel indices for parallel contact passes.
+            let mut surf_count = 0usize;
+            for k in 0..body.pixels.len() {
+                let gi = start + k;
+                if pixels[gi * P_STRIDE + P_DETACHED] == 0 && surface_bit(&surface, gi) {
+                    surface_list[start + surf_count] = gi as u32;
+                    surf_count += 1;
+                }
+            }
+            bodies[bb + B_SURFACE_COUNT] = surf_count as u32;
             start += body.pixels.len();
         }
 
@@ -416,6 +430,9 @@ impl RigidGpu {
         }
         if let Some(handle) = &self.surface {
             client.write(handle, Bytes::from_elems(surface));
+        }
+        if let Some(handle) = &self.surface_list {
+            client.write(handle, Bytes::from_elems(surface_list));
         }
         // The owner map identifies which body a `pmap` slot belongs to. Reset
         // it when the slot assignments can have changed; the reconcile pass
@@ -652,6 +669,11 @@ fn words_of(bytes: &[u8], words: usize) -> Vec<u32> {
 /// Sets the surface bit of device pixel `index` in the packed bitmap.
 fn set_surface_bit(surface: &mut [u32], index: usize) {
     surface[index / 32] |= 1u32 << (index % 32);
+}
+
+/// Returns whether the surface bit of device pixel `index` is set.
+fn surface_bit(surface: &[u32], index: usize) -> bool {
+    (surface[index / 32] & (1u32 << (index % 32))) != 0
 }
 
 /// Surface classification of one body pixel.
