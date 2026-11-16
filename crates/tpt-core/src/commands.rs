@@ -168,8 +168,20 @@ pub enum ParticleField {
 pub enum RigidSpawnShape {
     /// Rectangular block of pixels.
     Box,
-    /// Filled disc of pixels.
+    /// Filled disc or ellipse of pixels.
     Circle,
+    /// Upward-pointing triangular cluster of pixels.
+    Triangle,
+}
+
+impl From<BrushShape> for RigidSpawnShape {
+    fn from(shape: BrushShape) -> Self {
+        match shape {
+            BrushShape::Circle => Self::Circle,
+            BrushShape::Square => Self::Box,
+            BrushShape::Triangle => Self::Triangle,
+        }
+    }
 }
 
 /// Cropped Eulerian air grids of a captured canvas region.
@@ -509,7 +521,23 @@ pub enum SimCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::DecoMode;
+    use super::{BrushShape, DecoMode, RigidSpawnShape};
+
+    #[test]
+    fn rigid_spawn_shape_maps_all_brush_shapes() {
+        assert_eq!(
+            RigidSpawnShape::from(BrushShape::Circle),
+            RigidSpawnShape::Circle
+        );
+        assert_eq!(
+            RigidSpawnShape::from(BrushShape::Square),
+            RigidSpawnShape::Box
+        );
+        assert_eq!(
+            RigidSpawnShape::from(BrushShape::Triangle),
+            RigidSpawnShape::Triangle
+        );
+    }
 
     #[test]
     fn deco_mode_index_round_trips() {

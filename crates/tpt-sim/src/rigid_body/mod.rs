@@ -510,6 +510,7 @@ fn materialise_pixel(
     if id >= particle_len(bufs) {
         return None;
     }
+    bufs.run_create_hook(id, px.grid_x, px.grid_y, px.elem_ty, 0);
     bufs.part_flags[id] = FLAG_RIGID_PIXEL | FLAG_SKIPMOVE;
     bufs.part_temp[id] = px.temp;
     bufs.part_life[id] = px.life;

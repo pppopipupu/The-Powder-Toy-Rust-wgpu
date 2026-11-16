@@ -4,13 +4,13 @@ use egui::{
     Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke,
     StrokeKind, Ui, vec2,
 };
-use tpt_core::commands::{DecoMode, RigidSpawnShape, SimToolKind};
+use tpt_core::commands::{DecoMode, SimToolKind};
 use tpt_core::constants::{
     COLOUR_DEFAULT, COLOUR_DEST, COLOUR_HEAT, COLOUR_LIFE, DISPLAY_AIRH, DISPLAY_AIRP,
-    DISPLAY_AIRV, DISPLAY_AIRW, DISPLAY_EFFE, MAX_TEMP, MIN_TEMP, PT_BISM, RENDER_BASC,
-    RENDER_EFFE,
+    DISPLAY_AIRV, DISPLAY_AIRW, DISPLAY_EFFE, MAX_TEMP, MIN_TEMP, PT_BISM, PT_DMND, PT_METL,
+    PT_STNE, RENDER_BASC, RENDER_EFFE,
 };
-use tpt_core::elements::ElementDef;
+use tpt_core::elements::{ElementDef, ElementRegistry, MenuCategory};
 use tpt_core::particle::SimulationConfig;
 
 use crate::app_state::{AppState, CanvasSizePreset, SelectedTool};
@@ -410,12 +410,31 @@ pub(super) fn rigid_id_at(state: &AppState, x: i32, y: i32) -> Option<u32> {
     })
 }
 
-/// Human-readable name of a rigid-body shape.
-pub(super) fn rigid_shape_label(shape: RigidSpawnShape) -> &'static str {
-    match shape {
-        RigidSpawnShape::Box => "Box",
-        RigidSpawnShape::Circle => "Circle",
-    }
+/// Element ids offered in the `RigidBodies` category.
+///
+/// Covers every menu-visible [`MenuCategory::Solids`] element along with the
+/// non-solid classic rigid presets (`STNE`, `METL`, `DMND`), in registry order.
+pub(super) fn rigid_body_materials(state: &AppState) -> Vec<u32> {
+    rigid_body_materials_for(&state.engine.registry, &state.engine.bufs.config)
+}
+
+/// Pure helper behind [`rigid_body_materials`] so unit tests can inspect the
+/// filtered list without initialising a GPU context.
+pub(super) fn rigid_body_materials_for(
+    registry: &ElementRegistry,
+    config: &SimulationConfig,
+) -> Vec<u32> {
+    registry
+        .elements
+        .iter()
+        .filter(|definition| {
+            definition.enabled
+                && menu_visible(definition, config)
+                && (definition.category == MenuCategory::Solids
+                    || matches!(definition.id, PT_STNE | PT_METL | PT_DMND))
+        })
+        .map(|definition| definition.id)
+        .collect()
 }
 
 /// Element spawn button painted with the element's authentic colour.
@@ -744,6 +763,39 @@ mod tests {
         assert_eq!(
             element_color(0x0012_34AB),
             Color32::from_rgb(0x12, 0x34, 0xAB)
+        );
+    }
+
+    #[test]
+    fn rigid_body_materials_cover_all_visible_solids_and_presets() {
+        use tpt_core::constants::{PT_COAL, PT_GRPH, PT_SPAWN, PT_TTAN, PT_WOOD};
+        use tpt_core::elements::{ElementRegistry, MenuCategory};
+
+        let registry = ElementRegistry::new_default();
+        let enabled = SimulationConfig::new(64, 64);
+        let list = rigid_body_materials_for(&registry, &enabled);
+
+        for def in &registry.elements {
+            if def.enabled && def.category == MenuCategory::Solids && menu_visible(def, &enabled) {
+                assert!(
+                    list.contains(&def.id),
+                    "Solids element {} ({}) must have a rigid body entry",
+                    def.name,
+                    def.id
+                );
+            }
+        }
+        for preset in [PT_STNE, PT_METL, PT_DMND, PT_WOOD, PT_COAL, PT_TTAN, PT_BISM, PT_GRPH] {
+            assert!(list.contains(&preset), "element {preset} must be listed");
+        }
+        assert!(!list.contains(&PT_SPAWN), "MenuVisible = 0 must stay hidden");
+
+        let mut mod_off = SimulationConfig::new(64, 64);
+        mod_off.mod_elements_enabled = false;
+        let off_list = rigid_body_materials_for(&registry, &mod_off);
+        assert!(
+            !off_list.contains(&PT_GRPH),
+            "mod Solids must respect mod_elements_enabled"
         );
     }
 }

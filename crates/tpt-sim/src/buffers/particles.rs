@@ -731,7 +731,7 @@ impl SimBuffers {
     /// that a static [`ElementDef`] default cannot carry. The rolls come from
     /// [`hash3`] keyed on the pixel and slot, so replaying a stroke reproduces
     /// the same scene; the bounds are TPT's `rng.between` ranges.
-    fn run_create_hook(&mut self, id: usize, x: i32, y: i32, ty: u32, v: i32) {
+    pub(crate) fn run_create_hook(&mut self, id: usize, x: i32, y: i32, ty: u32, v: i32) {
         let roll = hash3(x as u32, y as u32, id as u32);
         let roll2 = hash3(id as u32, y as u32, x as u32);
         // `int(sim->pv[y/CELL][x/CELL] * 64)`: the cell pressure snapshot the

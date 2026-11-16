@@ -1,10 +1,8 @@
 //! Bottom bar: brush controls and the element / wall / tool palette grid.
 
 use egui::{RichText, Ui};
-use tpt_core::commands::{BrushShape, RigidSpawnShape};
-use tpt_core::constants::{
-    PT_DMND, PT_GLAS, PT_ICEI, PT_METL, PT_NONE, PT_STNE, PT_WOOD, WL_ERASE,
-};
+use tpt_core::commands::BrushShape;
+use tpt_core::constants::{PT_NONE, WL_ERASE};
 use tpt_core::elements::MenuCategory;
 
 use crate::app_state::{
@@ -16,17 +14,14 @@ use crate::i18n::{t, t_fmt};
 
 use super::shared::{
     DECO_TOOL_BUTTONS, GUI_TOOL_BUTTONS, SIM_TOOL_BUTTONS, TEXT_DIM, deco_tool_colour,
-    element_button, element_description, element_name, element_rgb, menu_visible,
-    rigid_shape_label, tool_button, wall_description,
+    element_button, element_description, element_name, menu_visible, rigid_body_materials,
+    tool_button, wall_description,
 };
 
 /// TPT's `GOLTool` (`ToolGOL.cpp`): label `CUST`, colour `0xFEA900`.
 const GOL_TOOL_LABEL: &str = "CUST";
 /// `ToolGOL.cpp` button colour.
 const GOL_TOOL_COLOUR: u32 = 0x00FE_A900;
-
-/// Materials offered for rigid-body spawns.
-pub(super) const RIGID_MATERIALS: [u32; 6] = [PT_WOOD, PT_METL, PT_STNE, PT_DMND, PT_GLAS, PT_ICEI];
 
 pub(super) fn draw_bottom_bar(ui: &mut Ui, state: &mut AppState) {
     // The reference game binds the property tool to `Ctrl+P` (left button) and
@@ -207,29 +202,21 @@ fn draw_tool_grid(ui: &mut Ui, state: &mut AppState) {
         }
         MenuCategory::RigidBodies => {
             ui.horizontal_wrapped(|ui| {
-                for material in RIGID_MATERIALS {
-                    let name = element_name(state, material);
-                    let colour = element_rgb(state, material);
-                    for shape in [RigidSpawnShape::Box, RigidSpawnShape::Circle] {
-                        let tool = SelectedTool::RigidBody {
-                            shape,
-                            elem_ty: material,
-                        };
-                        let selected = primary == tool || secondary == tool;
-                        let label = format!("{} {name}", rigid_shape_label(shape));
-                        let response = tool_button(
-                            ui,
-                            &label,
-                            colour,
-                            t("bottom_bar.rigid_body_desc"),
-                            selected,
-                        );
-                        if response.clicked() {
-                            assignment = Some((false, tool));
-                        }
-                        if response.secondary_clicked() {
-                            assignment = Some((true, tool));
-                        }
+                for material in rigid_body_materials(state) {
+                    let definition = state.engine.registry.get(material);
+                    let tool = SelectedTool::RigidBody(material);
+                    let selected = primary == tool || secondary == tool;
+                    let description = format!(
+                        "{}\n{}",
+                        element_description(state, material),
+                        t("bottom_bar.rigid_body_desc")
+                    );
+                    let response = element_button(ui, definition, &description, selected);
+                    if response.clicked() {
+                        assignment = Some((false, tool));
+                    }
+                    if response.secondary_clicked() {
+                        assignment = Some((true, tool));
                     }
                 }
             });

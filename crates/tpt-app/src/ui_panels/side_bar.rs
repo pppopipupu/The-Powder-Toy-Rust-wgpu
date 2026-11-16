@@ -79,19 +79,48 @@ pub(super) fn draw_side_bar(ui: &mut Ui, state: &mut AppState) {
     // pointer is over an element chip. Port addition: keep the same
     // introduction visible here after the pick, so a selected element is
     // described without hovering a small palette button.
-    if let SelectedTool::Element(ty) = state.primary_tool
-        && let Some(definition) = element_def(state, ty)
-    {
-        ui.add_space(4.0);
-        ui.label(RichText::new(&definition.name).strong().color(ACCENT));
-        ui.add(
-            egui::Label::new(
-                RichText::new(element_description(state, ty))
-                    .size(14.0)
-                    .color(TEXT_DIM),
-            )
-            .wrap(),
-        );
+    match state.primary_tool {
+        SelectedTool::Element(ty) => {
+            if let Some(definition) = element_def(state, ty) {
+                ui.add_space(4.0);
+                ui.label(RichText::new(&definition.name).strong().color(ACCENT));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(element_description(state, ty))
+                            .size(14.0)
+                            .color(TEXT_DIM),
+                    )
+                    .wrap(),
+                );
+            }
+        }
+        SelectedTool::RigidBody(ty) => {
+            if let Some(definition) = element_def(state, ty) {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(t_fmt("app.tool_rigid_body", &[&definition.name]))
+                        .strong()
+                        .color(ACCENT),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(element_description(state, ty))
+                            .size(14.0)
+                            .color(TEXT_DIM),
+                    )
+                    .wrap(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(t("bottom_bar.rigid_body_desc"))
+                            .size(12.0)
+                            .color(TEXT_DIM),
+                    )
+                    .wrap(),
+                );
+            }
+        }
+        _ => {}
     }
 
     // The element search is a floating HUD window (`GameView.cpp:325-328`

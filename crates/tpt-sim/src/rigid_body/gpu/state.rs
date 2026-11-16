@@ -332,6 +332,10 @@ impl RigidGpu {
             // as `u16`s so a detachment can promote the neighbours; a body
             // above that range keeps every pixel on the surface.
             let tracked = body.pixels.len() <= NO_NEIGHBOR as usize;
+            let (base_x, base_y) = body
+                .pixels
+                .first()
+                .map_or((0.0f32, 0.0f32), |px| (px.local_x, px.local_y));
             let mut local_index: std::collections::HashMap<(i32, i32), u32> =
                 std::collections::HashMap::with_capacity(if tracked {
                     body.pixels.len()
@@ -340,8 +344,13 @@ impl RigidGpu {
                 });
             if tracked {
                 for (k, px) in body.pixels.iter().enumerate() {
+                    // Subtracting a reference pixel keeps grid offsets integer
+                    // even when the centroid shift sits on a half-pixel.
                     local_index
-                        .entry((px.local_x.round() as i32, px.local_y.round() as i32))
+                        .entry((
+                            (px.local_x - base_x).round() as i32,
+                            (px.local_y - base_y).round() as i32,
+                        ))
                         .or_insert(k as u32);
                 }
             }
@@ -353,8 +362,8 @@ impl RigidGpu {
                     .map_or(NO_PID, |id| id as u32);
                 let (interior, neighbor) = pixel_surface_state(
                     &local_index,
-                    px.local_x.round() as i32,
-                    px.local_y.round() as i32,
+                    (px.local_x - base_x).round() as i32,
+                    (px.local_y - base_y).round() as i32,
                     k,
                 );
                 if pid != NO_PID && interior == 0 {

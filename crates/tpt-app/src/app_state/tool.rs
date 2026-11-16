@@ -6,7 +6,7 @@
 //! (`DEFAULT_UI_SAMPLE`) and the single-particle spawn tool.
 
 use crate::i18n::{t, t_fmt};
-use tpt_core::commands::{DecoMode, RigidSpawnShape, SimToolKind};
+use tpt_core::commands::{DecoMode, SimToolKind};
 
 /// Tool currently assigned to a mouse button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,13 +17,9 @@ pub enum SelectedTool {
     Wall(u8),
     /// Apply a non-drawing simulation tool (heat, wind, gravity, ...).
     SimTool(SimToolKind),
-    /// Spawn a rigid body cluster of the given shape and element.
-    RigidBody {
-        /// Shape rasterized for the new rigid body.
-        shape: RigidSpawnShape,
-        /// Element id of the pixels making up the body.
-        elem_ty: u32,
-    },
+    /// Spawn a rigid body cluster of the given element using the active brush
+    /// shape and radii.
+    RigidBody(u32),
     /// Erase particles and walls under the brush.
     Eraser,
     /// `DEFAULT_UI_PROPERTY`: rewrite `tmp`/`tmp2`/`life`/`ctype` of the
@@ -65,7 +61,7 @@ impl SelectedTool {
     /// Element id associated with the tool, if any.
     pub fn element_ty(self) -> Option<u32> {
         match self {
-            Self::Element(ty) | Self::RigidBody { elem_ty: ty, .. } => Some(ty),
+            Self::Element(ty) | Self::RigidBody(ty) => Some(ty),
             Self::Gol { .. } => Some(tpt_core::constants::PT_LIFE),
             Self::Wall(_) | Self::SimTool(_) | Self::Eraser => None,
             Self::Property | Self::Sign { .. } | Self::SignTool | Self::Sample | Self::Particle => {
@@ -98,20 +94,14 @@ impl SelectedTool {
     /// Stable preference key, persisted as `Tool.Primary` / `Tool.Secondary`.
     ///
     /// The format mirrors the reference tool identifiers loosely
-    /// (`element:17`, `wall:3`, `sim:pos_grav`, `rigid:box:11`, `eraser`, ...)
+    /// (`element:17`, `wall:3`, `sim:pos_grav`, `rigid:11`, `eraser`, ...)
     /// and is versioned by [`Self::from_key`] rejecting unknown keys.
     pub fn to_key(self) -> String {
         match self {
             Self::Element(ty) => format!("element:{ty}"),
             Self::Wall(id) => format!("wall:{id}"),
             Self::SimTool(kind) => format!("sim:{}", sim_tool_key(kind)),
-            Self::RigidBody { shape, elem_ty } => {
-                let shape = match shape {
-                    RigidSpawnShape::Box => "box",
-                    RigidSpawnShape::Circle => "circle",
-                };
-                format!("rigid:{shape}:{elem_ty}")
-            }
+            Self::RigidBody(elem_ty) => format!("rigid:{elem_ty}"),
             Self::Eraser => String::from("eraser"),
             Self::Property => String::from("property"),
             Self::Sign { mode } => format!("sign:{}", deco_mode_key(mode)),
@@ -149,15 +139,16 @@ impl SelectedTool {
             ("wall", Some(rest)) => rest.parse().ok().map(Self::Wall),
             ("sim", Some(rest)) => sim_tool_from_key(rest).map(Self::SimTool),
             ("rigid", Some(rest)) => {
-                let (shape, ty) = rest.split_once(':')?;
-                let shape = match shape {
-                    "box" => RigidSpawnShape::Box,
-                    "circle" => RigidSpawnShape::Circle,
-                    _ => return None,
-                };
-                ty.parse()
-                    .ok()
-                    .map(|elem_ty| Self::RigidBody { shape, elem_ty })
+                if let Ok(elem_ty) = rest.parse::<u32>() {
+                    Some(Self::RigidBody(elem_ty))
+                } else {
+                    // Legacy keys stored the spawn shape (`rigid:box:11`).
+                    let (shape, ty) = rest.split_once(':')?;
+                    match shape {
+                        "box" | "circle" | "triangle" => ty.parse().ok().map(Self::RigidBody),
+                        _ => None,
+                    }
+                }
             }
             _ => None,
         }
@@ -169,9 +160,7 @@ impl SelectedTool {
             Self::Element(ty) => t_fmt("app.tool_element", &[&ty.to_string()]),
             Self::Wall(id) => t_fmt("app.tool_wall", &[&id.to_string()]),
             Self::SimTool(kind) => sim_tool_key(kind).to_uppercase(),
-            Self::RigidBody { elem_ty, .. } => {
-                t_fmt("app.tool_rigid_body", &[&elem_ty.to_string()])
-            }
+            Self::RigidBody(elem_ty) => t_fmt("app.tool_rigid_body", &[&elem_ty.to_string()]),
             Self::Eraser => String::from("Eraser"),
             Self::Property => String::from("PROP"),
             Self::Sign { mode } => t_fmt("app.tool_decoration", &[mode.label()]),
@@ -290,14 +279,8 @@ mod tests {
             SelectedTool::Element(43),
             SelectedTool::Wall(0),
             SelectedTool::Wall(29),
-            SelectedTool::RigidBody {
-                shape: RigidSpawnShape::Box,
-                elem_ty: 15,
-            },
-            SelectedTool::RigidBody {
-                shape: RigidSpawnShape::Circle,
-                elem_ty: 25,
-            },
+            SelectedTool::RigidBody(15),
+            SelectedTool::RigidBody(25),
         ];
         tools.extend(SimToolKind::ALL.into_iter().map(SelectedTool::SimTool));
         tools.extend(
@@ -313,6 +296,22 @@ mod tests {
                 tool.to_key()
             );
         }
+    }
+
+    #[test]
+    fn legacy_rigid_keys_load_without_shape() {
+        assert_eq!(
+            SelectedTool::from_key("rigid:box:15"),
+            Some(SelectedTool::RigidBody(15))
+        );
+        assert_eq!(
+            SelectedTool::from_key("rigid:circle:25"),
+            Some(SelectedTool::RigidBody(25))
+        );
+        assert_eq!(
+            SelectedTool::from_key("rigid:triangle:36"),
+            Some(SelectedTool::RigidBody(36))
+        );
     }
 
     #[test]

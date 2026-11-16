@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use tpt_core::commands::{BrushShape, SimCommand};
+use tpt_core::commands::{BrushShape, RigidSpawnShape, SimCommand};
 use tpt_core::constants::{CELL, PT_LIGH, PT_NONE, WL_ERASE, WL_FAN};
 
 use crate::app_state::{AppState, SelectedTool, pack_deco_colour};
@@ -613,10 +613,7 @@ pub fn apply_tool_stroke(
                 dragging: !(is_line || is_rect),
             });
         }
-        SelectedTool::RigidBody {
-            shape: body_shape,
-            elem_ty,
-        } => {
+        SelectedTool::RigidBody(elem_ty) => {
             // Rigid bodies are spawned once per press at the press position;
             // dragging does not sweep them. A degenerate brush still spawns a
             // body with at least one pixel of half-extent.
@@ -625,7 +622,7 @@ pub fn apply_tool_stroke(
                 y: p0.1 as f32,
                 half_w: rx.clamp(1, MAX_BRUSH_RADIUS),
                 half_h: ry.clamp(1, MAX_BRUSH_RADIUS),
-                shape: body_shape,
+                shape: RigidSpawnShape::from(shape),
                 elem_ty,
             });
         }

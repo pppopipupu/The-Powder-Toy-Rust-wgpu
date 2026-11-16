@@ -645,22 +645,19 @@ pub(super) fn draw_viewport(ui: &mut Ui, state: &mut AppState, sim_tex_id: Textu
         }
     }
 
-    // Rigid bodies spawn once per press with the brush footprint, so show that
-    // footprint continuously for the tool bound to either button.
-    let rigid_tool = match (state.primary_tool, state.secondary_tool) {
-        (SelectedTool::RigidBody { shape, .. }, _) => Some(shape),
-        (_, SelectedTool::RigidBody { shape, .. }) => Some(shape),
-        _ => None,
-    };
-    if let (Some(shape), Some((cx, cy))) = (rigid_tool, sim_pos) {
+    // Rigid bodies spawn once per press with the brush footprint and shape, so
+    // show that footprint continuously when bound to either button.
+    let has_rigid = matches!(state.primary_tool, SelectedTool::RigidBody(_))
+        || matches!(state.secondary_tool, SelectedTool::RigidBody(_));
+    if has_rigid && let Some((cx, cy)) = sim_pos {
         draw_rigid_preview(
             &painter,
             view,
             cx,
             cy,
-            state.brush_rx,
-            state.brush_ry,
-            shape,
+            state.brush_rx.clamp(1, crate::brushes::MAX_BRUSH_RADIUS),
+            state.brush_ry.clamp(1, crate::brushes::MAX_BRUSH_RADIUS),
+            state.brush_shape,
         );
     }
 

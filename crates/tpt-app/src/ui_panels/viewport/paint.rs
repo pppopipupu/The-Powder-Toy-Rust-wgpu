@@ -112,7 +112,7 @@ pub(super) fn handle_paint_button(
 
     let is_rigid = matches!(
         state.selected_tool(is_secondary),
-        SelectedTool::RigidBody { .. }
+        SelectedTool::RigidBody(_)
     );
     if pressed && frame.pointer_in_view {
         if let Some(position) = frame.sim_pos {

@@ -33,19 +33,17 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::{Color32, Key, Modifiers, RichText, Stroke};
-use tpt_core::commands::RigidSpawnShape;
 use tpt_core::constants::{PT_BISM, PT_NONE, WL_ERASE};
 
 use crate::app_state::{
     AppScreen, AppState, GameMode, SelectedTool, pack_deco_colour, persist_tool_settings,
 };
-use crate::i18n::t;
+use crate::i18n::{t, t_fmt};
 
-use super::bottom_bar::RIGID_MATERIALS;
 use super::shared::{
     DECO_TOOL_BUTTONS, GUI_TOOL_BUTTONS, SIM_TOOL_BUTTONS, TEXT_DIM, contrasting_text,
     deco_tool_colour, element_color, element_description, element_name, element_rgb, menu_visible,
-    paint_bism_swatch, rigid_shape_label, wall_description,
+    paint_bism_swatch, rigid_body_materials, wall_description,
 };
 use super::side_bar::category_label;
 
@@ -63,12 +61,7 @@ enum Candidate {
     /// Wall tool for the given wall id.
     Wall(u8),
     /// Rigid-body spawn tool (port-only palette section).
-    Rigid {
-        /// Shape rasterized for the new rigid body.
-        shape: RigidSpawnShape,
-        /// Element the body is made of.
-        elem_ty: u32,
-    },
+    Rigid(u32),
     /// A tool whose name, description and menu label are fixed strings.
     Named {
         /// Tool bound by a pick.
@@ -372,13 +365,8 @@ fn candidates(state: &AppState) -> Vec<Candidate> {
             colour: deco_tool_colour(mode, deco_colour),
         });
     }
-    for material in RIGID_MATERIALS {
-        for shape in [RigidSpawnShape::Box, RigidSpawnShape::Circle] {
-            list.push(Candidate::Rigid {
-                shape,
-                elem_ty: material,
-            });
-        }
+    for material in rigid_body_materials(state) {
+        list.push(Candidate::Rigid(material));
     }
     for (index, rule) in tpt_sim::gol_kernel::BUILTIN_GOL.iter().enumerate() {
         list.push(Candidate::Named {
@@ -399,7 +387,7 @@ impl Candidate {
         match self {
             Self::Element(ty) => SelectedTool::Element(ty),
             Self::Wall(id) => SelectedTool::Wall(id),
-            Self::Rigid { shape, elem_ty } => SelectedTool::RigidBody { shape, elem_ty },
+            Self::Rigid(elem_ty) => SelectedTool::RigidBody(elem_ty),
             Self::Named { tool, .. } => tool,
         }
     }
@@ -431,13 +419,16 @@ impl Candidate {
                     Cow::Borrowed(t("side_bar.cat_walls")),
                 ],
             },
-            Self::Rigid { shape, elem_ty } => [
-                Cow::Owned(format!(
-                    "{} {}",
-                    rigid_shape_label(shape),
-                    element_name(state, elem_ty)
+            Self::Rigid(elem_ty) => [
+                Cow::Owned(t_fmt(
+                    "app.tool_rigid_body",
+                    &[&element_name(state, elem_ty)],
                 )),
-                Cow::Borrowed(t("bottom_bar.rigid_body_desc")),
+                Cow::Owned(format!(
+                    "{}\n{}",
+                    element_description(state, elem_ty),
+                    t("bottom_bar.rigid_body_desc")
+                )),
                 Cow::Borrowed(t("side_bar.cat_rigid_bodies")),
             ],
             Self::Named {
@@ -479,15 +470,15 @@ impl Candidate {
                     iridescent: false,
                 },
             },
-            Self::Rigid { shape, elem_ty } => Row {
-                name: format!(
-                    "{} {}",
-                    rigid_shape_label(shape),
-                    element_name(state, elem_ty)
+            Self::Rigid(elem_ty) => Row {
+                name: t_fmt("app.tool_rigid_body", &[&element_name(state, elem_ty)]),
+                description: format!(
+                    "{}\n{}",
+                    element_description(state, elem_ty),
+                    t("bottom_bar.rigid_body_desc")
                 ),
-                description: t("bottom_bar.rigid_body_desc").to_string(),
                 colour: element_rgb(state, elem_ty),
-                iridescent: false,
+                iridescent: elem_ty == PT_BISM,
             },
             Self::Named {
                 name,

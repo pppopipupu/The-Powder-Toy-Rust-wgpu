@@ -474,21 +474,17 @@ impl RigidBody2D {
         temp: f32,
         unit_weight: f32,
     ) -> Self {
-        let half_w = half_w.max(0);
-        let half_h = half_h.max(0);
-        let width = (2 * half_w + 1) as usize;
-        let height = (2 * half_h + 1) as usize;
-
-        let mut pixels = Vec::with_capacity(width * height);
-        for gy in -half_h..=half_h {
-            for gx in -half_w..=half_w {
-                pixels.push(new_pixel(center_x, center_y, gx, gy, elem_ty, temp));
-            }
-        }
-
-        let mut body = Self::empty(id, center_x, center_y, pixels);
-        body.recompute_mass_properties(|_| unit_weight);
-        body
+        Self::from_half_extents(
+            id,
+            center_x,
+            center_y,
+            half_w,
+            half_h,
+            elem_ty,
+            temp,
+            unit_weight,
+            |_, _| true,
+        )
     }
 
     /// Builds a filled circular body of the given radius, centred on
@@ -502,16 +498,108 @@ impl RigidBody2D {
         temp: f32,
         unit_weight: f32,
     ) -> Self {
-        let radius = radius.max(0);
-        let r = radius as i64;
-        let r_sq = r * r;
+        Self::new_ellipse(
+            id,
+            center_x,
+            center_y,
+            radius,
+            radius,
+            elem_ty,
+            temp,
+            unit_weight,
+        )
+    }
 
-        let mut pixels = Vec::new();
-        for gy in -radius..=radius {
-            for gx in -radius..=radius {
-                let gx64 = gx as i64;
-                let gy64 = gy as i64;
-                if gx64 * gx64 + gy64 * gy64 <= r_sq {
+    /// Builds a filled elliptical body with the given half-axes, centred on
+    /// `(center_x, center_y)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_ellipse(
+        id: u32,
+        center_x: f32,
+        center_y: f32,
+        half_w: i32,
+        half_h: i32,
+        elem_ty: u32,
+        temp: f32,
+        unit_weight: f32,
+    ) -> Self {
+        let hw = half_w.max(0) as i128;
+        let hh = half_h.max(0) as i128;
+        let limit = hw * hw * hh * hh;
+        Self::from_half_extents(
+            id,
+            center_x,
+            center_y,
+            half_w,
+            half_h,
+            elem_ty,
+            temp,
+            unit_weight,
+            |gx, gy| {
+                let gx = gx as i128;
+                let gy = gy as i128;
+                gx * gx * hh * hh + gy * gy * hw * hw <= limit
+            },
+        )
+    }
+
+    /// Builds an upward-pointing triangular body with the given half-extents,
+    /// matching the brush rasterisation in `tpt-app`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_triangle(
+        id: u32,
+        center_x: f32,
+        center_y: f32,
+        half_w: i32,
+        half_h: i32,
+        elem_ty: u32,
+        temp: f32,
+        unit_weight: f32,
+    ) -> Self {
+        let hw = half_w.max(0) as i64;
+        let hh = half_h.max(0) as i64;
+        Self::from_half_extents(
+            id,
+            center_x,
+            center_y,
+            half_w,
+            half_h,
+            elem_ty,
+            temp,
+            unit_weight,
+            |gx, gy| {
+                let row_half = if hh == 0 {
+                    hw
+                } else {
+                    hw * (gy as i64 + hh) / (2 * hh)
+                };
+                (gx as i64).abs() <= row_half
+            },
+        )
+    }
+
+    /// Collects the pixels inside `inside(gx, gy)` and centres mass properties.
+    #[allow(clippy::too_many_arguments)]
+    fn from_half_extents(
+        id: u32,
+        center_x: f32,
+        center_y: f32,
+        half_w: i32,
+        half_h: i32,
+        elem_ty: u32,
+        temp: f32,
+        unit_weight: f32,
+        mut inside: impl FnMut(i32, i32) -> bool,
+    ) -> Self {
+        let half_w = half_w.max(0);
+        let half_h = half_h.max(0);
+        let width = (2 * half_w + 1) as usize;
+        let height = (2 * half_h + 1) as usize;
+
+        let mut pixels = Vec::with_capacity(width * height);
+        for gy in -half_h..=half_h {
+            for gx in -half_w..=half_w {
+                if inside(gx, gy) {
                     pixels.push(new_pixel(center_x, center_y, gx, gy, elem_ty, temp));
                 }
             }
@@ -747,5 +835,35 @@ mod tests {
         let world = body.local_to_world(1.0, 0.0);
         assert!((world.x - 64.0).abs() < 1e-4);
         assert!((world.y - 65.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn ellipse_matches_circle_when_symmetric_and_scales_asymmetrically() {
+        let circle = RigidBody2D::new_circle(1, 50.0, 50.0, 4, PT_STNE, 295.15, 1.0);
+        let sym = RigidBody2D::new_ellipse(2, 50.0, 50.0, 4, 4, PT_STNE, 295.15, 1.0);
+        assert_eq!(circle.pixels.len(), sym.pixels.len());
+
+        let wide = RigidBody2D::new_ellipse(3, 50.0, 50.0, 6, 2, PT_STNE, 295.15, 1.0);
+        assert!(wide.pixels.iter().any(|p| p.grid_x == 56 && p.grid_y == 50));
+        assert!(!wide.pixels.iter().any(|p| p.grid_x == 50 && p.grid_y == 53));
+    }
+
+    #[test]
+    fn triangle_matches_brush_footprint_and_centres_mass() {
+        let body = RigidBody2D::new_triangle(4, 100.0, 100.0, 2, 2, PT_WOOD, 295.15, 1.0);
+        // Same 5 + 3 + 3 + 1 + 1 = 13 pixels as `BrushShape::Triangle` at radius 2.
+        assert_eq!(body.pixels.len(), 13);
+        assert!(body.pixels.iter().any(|p| p.grid_x == 100 && p.grid_y == 98));
+        assert!(body.pixels.iter().any(|p| p.grid_x == 98 && p.grid_y == 102));
+        assert!(body.pixels.iter().any(|p| p.grid_x == 102 && p.grid_y == 102));
+
+        let (mut sx, mut sy) = (0.0f32, 0.0f32);
+        for pixel in &body.pixels {
+            sx += pixel.local_x;
+            sy += pixel.local_y;
+        }
+        assert!(sx.abs() < 1e-4);
+        assert!(sy.abs() < 1e-4);
+        assert!(body.cm_y > 100.0);
     }
 }
