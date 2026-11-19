@@ -46,6 +46,7 @@ use tpt_core::constants::*;
 
 use super::PassDims;
 use super::combustion::WORD_DEFAULT_TEMP;
+use super::dispatch::{SIM_SLOT_NEUT, sim_grid};
 use super::shared::{
     CR_NO_OCCUPANCY, CR_SET_CTYPE, CR_SET_TEMP, CR_SET_VX, CR_SET_VY, CREATE_QUEUE_WORDS,
     WORD_EXPLOSIVE, WORD_FLAMMABLE, elem_word, hash_u32, launch_grid, mix_index, pmap_at,
@@ -210,11 +211,17 @@ pub(crate) fn neut_row_reset_kernel(
 
 /// Launch [`neut_row_reset_kernel`] for one frame.
 pub(super) fn launch_row_reset(bufs: &SimBuffers, dims: &PassDims) {
-    let (cubes, dim) = launch_grid(dims.used_slots);
+    let (cubes, _) = launch_grid(dims.used_slots);
+    launch_row_reset_with_grid(bufs, dims, CubeCount::Static(cubes, 1, 1));
+}
+
+/// Launch [`neut_row_reset_kernel`] using a caller-provided static or indirect grid.
+pub(super) fn launch_row_reset_with_grid(bufs: &SimBuffers, dims: &PassDims, grid: CubeCount) {
+    let (_, dim) = launch_grid(dims.used_slots);
     unsafe {
         neut_row_reset_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(
                 bufs.gpu_spawn_defaults.clone(),
@@ -369,11 +376,12 @@ pub(super) use update::neut_reaction_kernel;
 
 /// Launch the neutron pass for one reaction step.
 pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let grid = sim_grid(bufs, SIM_SLOT_NEUT);
     unsafe {
         neut_reaction_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
@@ -405,7 +413,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         neut_seed_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),

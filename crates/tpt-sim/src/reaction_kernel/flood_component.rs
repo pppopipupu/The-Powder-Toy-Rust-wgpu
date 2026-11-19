@@ -231,21 +231,22 @@ pub(crate) fn flood_drain_kernel(
 }
 
 /// Queue every pixel of `target_ty` whose `field` holds `value_a` or
-/// `value_b`.
-pub(crate) fn launch_seed_scan(
+/// `value_b`, using the caller-provided grid (static or indirect).
+pub(crate) fn launch_seed_scan_with_grid(
     bufs: &SimBuffers,
     dims: &PassDims,
+    grid: CubeCount,
     field: u32,
     value_a: i32,
     value_b: i32,
     target_ty: u32,
 ) {
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
     let pixels = dims.pixels as u32;
     unsafe {
         flood_seed_scan_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -262,6 +263,28 @@ pub(crate) fn launch_seed_scan(
             target_ty,
         );
     }
+}
+
+/// Queue every pixel of `target_ty` whose `field` holds `value_a` or
+/// `value_b`.
+pub(crate) fn launch_seed_scan(
+    bufs: &SimBuffers,
+    dims: &PassDims,
+    field: u32,
+    value_a: i32,
+    value_b: i32,
+    target_ty: u32,
+) {
+    let (cubes, _) = launch_grid(dims.pixels);
+    launch_seed_scan_with_grid(
+        bufs,
+        dims,
+        CubeCount::Static(cubes, 1, 1),
+        field,
+        value_a,
+        value_b,
+        target_ty,
+    );
 }
 
 /// Drain the queue into the 4-connected run of `target_ty`.

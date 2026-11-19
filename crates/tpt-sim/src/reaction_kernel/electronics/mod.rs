@@ -120,15 +120,16 @@ use crate::buffers::SimBuffers;
 /// a run longer than the cascade keeps lighting from its frontier sparks on the
 /// following frames.
 pub(in crate::reaction_kernel) fn launch_flood_inst_pass(bufs: &SimBuffers, dims: &PassDims) {
-    if dims.pixels == 0 {
+    if dims.pixels == 0 || !bufs.has_seen_elem(tpt_core::constants::PT_INST) {
         return;
     }
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let inst_grid = super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_ELEC_INST);
     for _ in 0..sparks::INST_FLOOD_ROUNDS {
         unsafe {
             sparks::flood_inst_kernel::launch_unchecked(
                 &bufs.client,
-                CubeCount::Static(cubes, 1, 1),
+                inst_grid.clone(),
                 CubeDim::new_1d(dim),
                 BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
                 BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -161,62 +162,66 @@ pub(in crate::reaction_kernel) fn launch_element_update_pass(bufs: &SimBuffers, 
     if dims.pixels == 0 || dims.xcells == 0 {
         return;
     }
-    // `BeforeSim`'s WireWorld staging is slot parallel; the generation below
-    // is pixel parallel.
-    let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
-    unsafe {
-        wire::wire_stage_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
-            CubeDim::new_1d(slot_dim),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            dims.used_slots as u32,
-        );
-    }
-
     let (cubes, dim) = launch_grid(dims.pixels);
-    unsafe {
-        wire::wire_update_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            dims.xres,
-            dims.yres,
-        );
+    if bufs.has_seen_elem(tpt_core::constants::PT_WIRE) {
+        // `BeforeSim`'s WireWorld staging is slot parallel; the generation below
+        // is pixel parallel.
+        let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
+        unsafe {
+            wire::wire_stage_kernel::launch_unchecked(
+                &bufs.client,
+                CubeCount::Static(slot_cubes, 1, 1),
+                CubeDim::new_1d(slot_dim),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                dims.used_slots as u32,
+            );
+        }
+
+        unsafe {
+            wire::wire_update_kernel::launch_unchecked(
+                &bufs.client,
+                CubeCount::Static(cubes, 1, 1),
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                dims.xres,
+                dims.yres,
+            );
+        }
     }
 
-    let ycells = (dims.cells / dims.xcells.max(1) as usize) as u32;
-    unsafe {
-        pump::pump_update_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-            ycells,
-        );
+    if bufs.has_seen_elem(tpt_core::constants::PT_PUMP) {
+        let ycells = (dims.cells / dims.xcells.max(1) as usize) as u32;
+        unsafe {
+            pump::pump_update_kernel::launch_unchecked(
+                &bufs.client,
+                CubeCount::Static(cubes, 1, 1),
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+                ycells,
+            );
+        }
     }
 
     unsafe {
         thunder::thunder_update_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_ELEC_THDR_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),

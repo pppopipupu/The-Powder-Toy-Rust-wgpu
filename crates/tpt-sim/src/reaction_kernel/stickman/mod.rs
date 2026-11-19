@@ -31,6 +31,7 @@ use tpt_core::constants::*;
 use crate::buffers::SimBuffers;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_STICKMAN_SLOT, sim_grid};
 use super::shared::launch_grid;
 
 const C_PT_NONE: u32 = 0;
@@ -98,11 +99,11 @@ pub fn is_obstacle(pmap: &[u32], xres: u32, yres: u32, x: i32, y: i32) -> bool {
 
 pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     let control = bufs.stickman_control;
-    let (cubes, dim) = launch_grid(dims.used_slots);
+    let (_cubes, dim) = launch_grid(dims.used_slots);
     unsafe {
         stickman_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_STICKMAN_SLOT),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),

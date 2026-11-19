@@ -36,12 +36,55 @@ fn reset_live_kernel(live: &mut [Atomic<u32>]) {
     }
 }
 
+#[allow(clippy::erasing_op)]
+#[cube]
+fn seed_u32(anchor: u32, value: u32) -> u32 {
+    anchor * 0u32 + value
+}
+
 #[cube(launch_unchecked)]
 fn count_live_kernel(part_ty: &[u32], live: &mut [Atomic<u32>], bound: u32) {
     let idx = ABSOLUTE_POS as u32;
-    if idx < bound {
-        if part_ty[idx as usize] != C_PT_NONE {
-            live[0].fetch_add(1u32);
+    let mut alive = seed_u32(bound, 0u32);
+    if idx < bound && part_ty[idx as usize] != C_PT_NONE {
+        alive = 1u32;
+    }
+    let mut sm = Shared::<[u32]>::new_slice(256usize);
+    let tid = UNIT_POS_X as usize;
+    sm[tid] = alive;
+    sync_cube();
+    if tid < 128usize {
+        sm[tid] += sm[tid + 128usize];
+    }
+    sync_cube();
+    if tid < 64usize {
+        sm[tid] += sm[tid + 64usize];
+    }
+    sync_cube();
+    if tid < 32usize {
+        sm[tid] += sm[tid + 32usize];
+    }
+    sync_cube();
+    if tid < 16usize {
+        sm[tid] += sm[tid + 16usize];
+    }
+    sync_cube();
+    if tid < 8usize {
+        sm[tid] += sm[tid + 8usize];
+    }
+    sync_cube();
+    if tid < 4usize {
+        sm[tid] += sm[tid + 4usize];
+    }
+    sync_cube();
+    if tid < 2usize {
+        sm[tid] += sm[tid + 2usize];
+    }
+    sync_cube();
+    if tid == 0usize {
+        let total = sm[0usize] + sm[1usize];
+        if total != 0u32 {
+            live[0].fetch_add(total);
         }
     }
 }

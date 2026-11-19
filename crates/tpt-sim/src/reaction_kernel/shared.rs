@@ -523,16 +523,17 @@ fn create_alloc_kernel(
     part_x: &mut [f32],
     part_y: &mut [f32],
     part_flags: &mut [u32],
+    elem_mask: &mut [Atomic<u32>],
     xres: u32,
     yres: u32,
     records: u32,
 ) {
     let rec = ABSOLUTE_POS as u32;
-    // `reset_gpu_create_queue` clears the count word but not the records, so a
-    // record belongs to this frame iff its index is below the count. Testing
-    // "the destination is still pending" would also skip every replace record,
-    // which arrives already allocated.
-    if rec < records && rec < create_queue[0] {
+    let total_rec = create_queue[0];
+    if rec >= total_rec || rec >= records {
+        terminate!();
+    }
+    if rec < records && rec < total_rec {
         let base = (1u32 + rec * CREATE_WORDS_U32) as usize;
         let ty = create_queue[base + CR_TY as usize];
         let x = create_queue[base + CR_X as usize] as i32;
@@ -598,6 +599,9 @@ fn create_alloc_kernel(
                     }
                 }
             }
+        }
+        if dst != CREATE_PENDING_U32 && dst != CREATE_FAILED_U32 && ty < PT_NUM_U32 {
+            elem_mask[(ty >> 5u32) as usize].fetch_or(1u32 << (ty & 31u32));
         }
         create_queue[base] = dst;
     }
@@ -953,6 +957,7 @@ pub(super) fn drain_gpu_creates(bufs: &SimBuffers, dims: &PassDims) {
             BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
+            BufferArg::from_raw_parts(bufs.gpu_elem_mask.clone(), 8),
             dims.xres,
             dims.yres,
             GPU_CREATE_COUNT_U32,
@@ -1231,8 +1236,14 @@ fn collect_gpu_free_slots_kernel(
 /// reserved window [`SimBuffers::GPU_SPAWN_START`]..[`SimBuffers::GPU_SPAWN_END`].
 pub(crate) fn refresh_gpu_free_slots(bufs: &SimBuffers) {
     let count = SimBuffers::GPU_SPAWN_COUNT;
+    let (cubes, _) = launch_grid(count);
+    refresh_gpu_free_slots_with_grid(bufs, CubeCount::Static(cubes, 1, 1));
+}
+
+pub(crate) fn refresh_gpu_free_slots_with_grid(bufs: &SimBuffers, collect_grid: CubeCount) {
+    let count = SimBuffers::GPU_SPAWN_COUNT;
     let free_len = count + 2;
-    let (cubes, dim) = launch_grid(count);
+    let (_, dim) = launch_grid(count);
     unsafe {
         reset_gpu_free_slots_kernel::launch_unchecked(
             &bufs.client,
@@ -1244,7 +1255,7 @@ pub(crate) fn refresh_gpu_free_slots(bufs: &SimBuffers) {
     unsafe {
         collect_gpu_free_slots_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            collect_grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), bufs.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), bufs.capacity),

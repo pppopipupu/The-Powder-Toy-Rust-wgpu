@@ -774,11 +774,13 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
         return;
     }
 
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let pix_grid =
+        super::super::dispatch::sim_grid(bufs, super::super::dispatch::SIM_SLOT_MODEXT_PIX);
     unsafe {
         csns_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -796,7 +798,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
     unsafe {
         tmps_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -817,7 +819,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
     unsafe {
         eclr_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -835,7 +837,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
         unsafe {
             gsns_kernel::launch_unchecked(
                 &bufs.client,
-                CubeCount::Static(cubes, 1, 1),
+                pix_grid.clone(),
                 CubeDim::new_1d(dim),
                 BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
                 BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),

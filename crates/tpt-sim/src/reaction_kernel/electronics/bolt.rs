@@ -183,11 +183,11 @@ pub(in crate::reaction_kernel) fn launch_etrd_bolt_pass(bufs: &SimBuffers, dims:
     if dims.capacity == 0 || dims.pixels == 0 {
         return;
     }
-    let (cubes, dim) = launch_grid(dims.used_slots);
+    let (_cubes, dim) = launch_grid(dims.used_slots);
     unsafe {
         etrd_bolt_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::super::dispatch::sim_grid(bufs, super::super::dispatch::SIM_SLOT_ELEC_ETRD),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
             BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),

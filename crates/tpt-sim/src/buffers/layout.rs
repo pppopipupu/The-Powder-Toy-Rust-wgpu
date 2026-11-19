@@ -50,6 +50,9 @@ impl SimBuffers {
         let grid = GridHandles::alloc(&client, num_pixels, num_cells);
         let (gpu_elem_props, gpu_can_move, gpu_spawn_defaults) =
             Self::alloc_element_tables(&client, registry);
+        let sim_dispatch_lut = crate::reaction_kernel::build_sim_dispatch_lut();
+        let gpu_sim_dispatch_lut =
+            client.create_from_slice(bytemuck::cast_slice(&sim_dispatch_lut));
 
         let mut bufs = Self {
             client,
@@ -156,8 +159,14 @@ impl SimBuffers {
             gpu_fire_b: grid.fire_b,
             fire_layer: vec![0; num_pixels],
             gpu_fire_layer: grid.fire_layer,
-            fx_cell: vec![0; num_cells],
+            fx_cell: vec![0; num_cells + crate::render_kernel::FX_SUMMARY_WORDS],
             gpu_fx_cell: grid.fx_cell,
+            gpu_render_ctrl: grid.render_ctrl,
+            gpu_elem_mask: grid.elem_mask,
+            gpu_sim_dispatch: grid.sim_dispatch,
+            gpu_sim_dispatch_lut,
+            host_seen_elem_mask: [0u64; 4],
+            modext_block_dirty: false,
             fx_axis: vec![0; xres + yres],
             gpu_fx_axis: grid.fx_axis,
             framebuf_rgba: vec![0xFF00_0000; num_pixels],
@@ -204,7 +213,6 @@ impl SimBuffers {
             gpu_edit_points: grid.edit_points,
             gpu_edit_rolls: grid.edit_rolls,
             gpu_move_lut: grid.move_lut,
-            gpu_elem_phys: grid.elem_phys,
             gpu_photon_mask: grid.photon_mask,
             move_tables_stale: true,
             gpu_create_queue: grid.create_queue,
@@ -228,6 +236,7 @@ impl SimBuffers {
             can_move_host: Vec::new(),
             elem_is_energy: Vec::new(),
             spawn_defaults_host: Vec::new(),
+            elem_table_generation: 0,
 
             rigid_bodies: Vec::new(),
             pending_live_count: None,
@@ -425,6 +434,8 @@ impl SimBuffers {
         self.pending_crystal_requests = None;
         self.crystal_seq_seen = 0;
         self.gpu_spawn_used = false;
+        self.host_seen_elem_mask = [0u64; 4];
+        self.modext_block_dirty = false;
     }
 
     /// Re-create the pixel/cell sized device buffers and clear their host shadows.
@@ -484,8 +495,9 @@ impl SimBuffers {
         self.gpu_fire_b = self.client.empty(num_cells * WORD);
         self.fire_layer = vec![0; num_pixels];
         self.gpu_fire_layer = self.client.empty(num_pixels * WORD);
-        self.fx_cell = vec![0; num_cells];
-        self.gpu_fx_cell = self.client.empty(num_cells * WORD);
+        let fx_words = num_cells + crate::render_kernel::FX_SUMMARY_WORDS;
+        self.fx_cell = vec![0; fx_words];
+        self.gpu_fx_cell = self.client.empty(fx_words * WORD);
         self.fx_axis = vec![0; xres + yres];
         self.gpu_fx_axis = self.client.empty((xres + yres) * WORD);
         self.framebuf_rgba = vec![0xFF00_0000; num_pixels];
@@ -559,9 +571,6 @@ impl SimBuffers {
         self.gpu_move_lut = self
             .client
             .empty(crate::move_kernel::build_move_lut_len() * WORD);
-        self.gpu_elem_phys = self
-            .client
-            .empty(crate::move_kernel::elem_phys_len() * WORD);
         self.gpu_photon_mask = self
             .client
             .empty(crate::move_kernel::photon_mask_len() * WORD);
@@ -580,6 +589,9 @@ impl SimBuffers {
         self.gpu_stkm_legs = alloc_zeroed(&self.client, STKM_SLOTS * STKM_LEGS_STRIDE);
         self.gpu_stkm_accs = alloc_zeroed(&self.client, STKM_SLOTS * STKM_ACCS_STRIDE);
         self.gpu_stkm_meta = alloc_zeroed(&self.client, STKM_SLOTS * STKM_META_STRIDE);
+        self.gpu_render_ctrl = alloc_zeroed(&self.client, crate::render_kernel::RENDER_CTRL_WORDS);
+        self.gpu_elem_mask = alloc_zeroed(&self.client, 8);
+        self.gpu_sim_dispatch = alloc_zeroed(&self.client, crate::reaction_kernel::SIM_DISPATCH_WORDS);
         self.gpu_spawn_used = false;
     }
 
@@ -706,6 +718,7 @@ impl SimBuffers {
             .map(|def| def.properties & TYPE_ENERGY != 0)
             .collect();
         self.upload_element_tables();
+        self.elem_table_generation = registry.generation;
         self.move_tables_stale = true;
     }
 
@@ -823,6 +836,9 @@ struct GridHandles {
     fire_b: Handle,
     fire_layer: Handle,
     fx_cell: Handle,
+    render_ctrl: Handle,
+    elem_mask: Handle,
+    sim_dispatch: Handle,
     fx_axis: Handle,
     framebuf: Handle,
     grav_mass: Handle,
@@ -845,7 +861,6 @@ struct GridHandles {
     edit_points: Handle,
     edit_rolls: Handle,
     move_lut: Handle,
-    elem_phys: Handle,
     photon_mask: Handle,
     create_queue: Handle,
     flood_queue: Handle,
@@ -889,7 +904,10 @@ impl GridHandles {
             fire_g: client.empty(cell_bytes),
             fire_b: client.empty(cell_bytes),
             fire_layer: client.empty(pixel_bytes),
-            fx_cell: client.empty(cell_bytes),
+            fx_cell: alloc_zeroed(client, num_cells + crate::render_kernel::FX_SUMMARY_WORDS),
+            render_ctrl: alloc_zeroed(client, crate::render_kernel::RENDER_CTRL_WORDS),
+            elem_mask: alloc_zeroed(client, 8),
+            sim_dispatch: alloc_zeroed(client, crate::reaction_kernel::SIM_DISPATCH_WORDS),
             fx_axis: client.empty(2 * pixel_bytes),
             framebuf: client.empty(pixel_bytes),
             grav_mass: client.empty(cell_bytes),
@@ -912,7 +930,6 @@ impl GridHandles {
             edit_points: alloc_zeroed(client, SimBuffers::EDIT_POINT_CAPACITY),
             edit_rolls: alloc_zeroed(client, SimBuffers::tool_rolls_capacity()),
             move_lut: client.empty(crate::move_kernel::build_move_lut_len() * WORD),
-            elem_phys: client.empty(crate::move_kernel::elem_phys_len() * WORD),
             photon_mask: client.empty(crate::move_kernel::photon_mask_len() * WORD),
             create_queue: alloc_zeroed(
                 client,

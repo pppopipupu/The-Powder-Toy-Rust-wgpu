@@ -17,6 +17,14 @@
 
 use cubecl::prelude::*;
 
+/// Runtime zero seed that stops CubeCL's compiler from constant-folding
+/// subsequent conditional reassignments of a `let mut` local.
+#[allow(clippy::erasing_op)]
+#[cube]
+pub(crate) fn seed_u32(anchor: u32, value: u32) -> u32 {
+    anchor * 0u32 + value
+}
+
 /// Clamp `v` into `[lo, hi]`.
 #[cube]
 pub(crate) fn clampf(v: f32, lo: f32, hi: f32) -> f32 {

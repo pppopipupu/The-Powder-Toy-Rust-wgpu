@@ -71,6 +71,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+struct BlitBindGroupCache {
+    buffer: wgpu::Buffer,
+    offset: u64,
+    bytes: u64,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+}
+
 /// GPU-side copy of the packed simulation framebuffer into the egui texture.
 ///
 /// The CubeCL render kernels write `0xAABBGGRR` words into a storage buffer;
@@ -80,6 +88,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 pub struct FramebufBlit {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    cached_bind_group: std::sync::Mutex<Option<BlitBindGroupCache>>,
 }
 
 impl FramebufBlit {
@@ -128,7 +137,11 @@ impl FramebufBlit {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
-        Self { pipeline, layout }
+        Self {
+            pipeline,
+            layout,
+            cached_bind_group: std::sync::Mutex::new(None),
+        }
     }
 
     /// Encodes the copy of `bufs.gpu_framebuf` into `view`.
@@ -160,31 +173,48 @@ impl FramebufBlit {
             return false;
         }
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("tpt-framebuf-blit-bind-group"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &resource.buffer,
-                        offset: resource.offset,
-                        size: std::num::NonZeroU64::new(bytes),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(view),
-                },
-            ],
+        let mut cache = self.cached_bind_group.lock().unwrap();
+        let matches = cache.as_ref().is_some_and(|c| {
+            c.buffer == resource.buffer
+                && c.offset == resource.offset
+                && c.bytes == bytes
+                && c.view == *view
         });
+        if !matches {
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("tpt-framebuf-blit-bind-group"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &resource.buffer,
+                            offset: resource.offset,
+                            size: std::num::NonZeroU64::new(bytes),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                ],
+            });
+            *cache = Some(BlitBindGroupCache {
+                buffer: resource.buffer.clone(),
+                offset: resource.offset,
+                bytes,
+                view: view.clone(),
+                bind_group,
+            });
+        }
+        let bind_group = &cache.as_ref().unwrap().bind_group;
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("tpt-framebuf-blit"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, bind_group, &[]);
         pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);
         true
     }
@@ -251,6 +281,16 @@ impl GpuContext {
     /// [`cubecl::wgpu::WgpuSetup`], so simulation kernels and presentation use
     /// the same physical device and no cross-device synchronisation is needed.
     pub fn new(window: Arc<Window>, init_sim_w: u32, init_sim_h: u32) -> Self {
+        Self::new_with_present_mode(window, init_sim_w, init_sim_h, wgpu::PresentMode::AutoVsync)
+    }
+
+    /// Creates the GPU context with an explicit swap-chain [`wgpu::PresentMode`].
+    pub fn new_with_present_mode(
+        window: Arc<Window>,
+        init_sim_w: u32,
+        init_sim_h: u32,
+        present_mode: wgpu::PresentMode,
+    ) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 
         let surface = instance
@@ -296,7 +336,7 @@ impl GpuContext {
             color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode,
             desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: Vec::new(),

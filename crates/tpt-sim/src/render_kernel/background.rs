@@ -16,10 +16,10 @@ use super::framebuffer::{
     absf, clampf, decay_px, fb_blue, fb_green, fb_red, heat_temp_colour, pack_rgb, solid_rgb,
 };
 use super::{
-    STYLE_DOTS, STYLE_HOLE, STYLE_MESH, STYLE_SOLID, STYLE_STRIPES, W_ALLOWAIR, W_ALLOWALLELEC,
-    W_ALLOWENERGY, W_ALLOWGAS, W_ALLOWLIQUID, W_ALLOWPOWDER, W_DETECT, W_EHOLE, W_EWALL, W_FAN,
-    W_STASIS, W_WALL, W_WALLELEC, WALL_COLOUR, WALL_COUNT, WALL_EGLOW, WALL_GLOW_SHIFT, WALL_STYLE,
-    WALL_WORDS,
+    FX_FIRE_MATTER, STYLE_DOTS, STYLE_HOLE, STYLE_MESH, STYLE_SOLID, STYLE_STRIPES, W_ALLOWAIR,
+    W_ALLOWALLELEC, W_ALLOWENERGY, W_ALLOWGAS, W_ALLOWLIQUID, W_ALLOWPOWDER, W_DETECT, W_EHOLE,
+    W_EWALL, W_FAN, W_STASIS, W_WALL, W_WALLELEC, WALL_COLOUR, WALL_COUNT, WALL_EGLOW,
+    WALL_GLOW_SHIFT, WALL_STYLE, WALL_WORDS,
 };
 
 /// `DISPLAY_AIRP`: TPT `PressureToColour` (`Renderer.cpp:925-932`).
@@ -253,6 +253,7 @@ fn wall_pattern(wall_id: u32, drawstyle: u32, x: u32, y: u32) -> u32 {
 
 /// Draws the wall grid and feeds electrified walls into the coarse glow buffers.
 #[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
 pub fn render_walls_kernel(
     framebuf: &mut [u32],
     wall_bmap: &[u32],
@@ -261,9 +262,11 @@ pub fn render_walls_kernel(
     fire_r: &mut [u32],
     fire_g: &mut [u32],
     fire_b: &mut [u32],
+    fx_cell: &mut [Atomic<u32>],
     xres: u32,
     yres: u32,
     xcells: u32,
+    ycells: u32,
     render_mode: u32,
 ) {
     let idx = ABSOLUTE_POS as u32;
@@ -298,6 +301,9 @@ pub fn render_walls_kernel(
                     fire_r[cell as usize] = cr;
                     fire_g[cell as usize] = cg;
                     fire_b[cell as usize] = cb;
+                    if (x & 3u32) == 0u32 && (y & 3u32) == 0u32 {
+                        fx_cell[(xcells * ycells) as usize].fetch_or(FX_FIRE_MATTER);
+                    }
                 }
             }
 

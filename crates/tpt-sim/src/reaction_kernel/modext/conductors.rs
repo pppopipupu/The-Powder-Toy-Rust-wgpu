@@ -388,11 +388,14 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
     }
 
     if dims.used_slots > 0 {
-        let (cubes, dim) = launch_grid(dims.used_slots);
+        let (_cubes, dim) = launch_grid(dims.used_slots);
         unsafe {
             wall_block_stamp_kernel::launch_unchecked(
                 &bufs.client,
-                CubeCount::Static(cubes, 1, 1),
+                super::super::dispatch::sim_grid(
+                    bufs,
+                    super::super::dispatch::SIM_SLOT_MODEXT_SLOT,
+                ),
                 CubeDim::new_1d(dim),
                 BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
                 BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
@@ -407,11 +410,13 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
         }
     }
 
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let pix_grid =
+        super::super::dispatch::sim_grid(bufs, super::super::dispatch::SIM_SLOT_MODEXT_PIX);
     unsafe {
         cwir_update_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -425,7 +430,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
         );
         copr_update_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -444,7 +449,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
         );
         thermistor_cool_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -454,7 +459,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
         );
         elex_update_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),

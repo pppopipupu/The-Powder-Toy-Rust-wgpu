@@ -60,7 +60,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::LocalKey;
 
 use cubecl::prelude::*;
-use cubecl::server::Handle;
+use cubecl::server::{BufferBinding, Handle};
 
 use tpt_core::constants::*;
 use tpt_core::elements::{ElementRegistry, GpuElementProps};
@@ -163,6 +163,35 @@ pub(crate) const FX_SPARK: u32 = 0x0000_0002;
 pub(crate) const FX_PMGLOW: u32 = 0x0000_0004;
 /// `fx_cell` bit: a pixel in the cell draws with `PMODE_BLUR`.
 pub(crate) const FX_PMBLUR: u32 = 0x0000_0008;
+/// `fx_cell` bit: a pixel in the cell draws with `PMODE_BLOB`.
+pub(crate) const FX_PMBLOB: u32 = 0x0000_0010;
+/// Summary bit: at least one matter particle or electrified wall may emit fire.
+pub(crate) const FX_FIRE_MATTER: u32 = 0x0000_0020;
+/// Summary bit: at least one energy particle may emit fire.
+pub(crate) const FX_FIRE_ENERGY: u32 = 0x0000_0040;
+/// Summary bit: at least one stickman/fighter/portal exists in the view.
+pub(crate) const FX_STICKMAN: u32 = 0x0000_0080;
+/// Any active fire-buffer contributor (`FX_FIRE_MATTER | FX_FIRE_ENERGY`).
+pub(crate) const FX_FIRE_ANY: u32 = FX_FIRE_MATTER | FX_FIRE_ENERGY;
+
+/// Extra control words appended past `xcells * ycells` in `gpu_fx_cell`:
+/// `[summary_or, fire_active, pad, pad]`.
+pub const FX_SUMMARY_WORDS: usize = 4;
+
+/// Number of indirect dispatch slots stored in `gpu_render_ctrl`.
+pub const RENDER_DISPATCH_SLOTS: usize = 9;
+/// Total `u32` words allocated in `SimBuffers::gpu_render_ctrl`.
+pub const RENDER_CTRL_WORDS: usize = RENDER_DISPATCH_SLOTS * 4;
+
+const R_SLOT_GLOW: usize = 0;
+const R_SLOT_FX_ROWS: usize = 1;
+const R_SLOT_RAYS: usize = 2;
+const R_SLOT_FIRE_MATTER: usize = 3;
+const R_SLOT_FIRE_ENERGY: usize = 4;
+const R_SLOT_FIRE_SPREAD: usize = 5;
+const R_SLOT_FIRE_ADD: usize = 6;
+const R_SLOT_FIRE_DECAY: usize = 7;
+const R_SLOT_STICKMAN: usize = 8;
 
 /// TPT `OPTIONS` mask; it carries `NO_DECO`/`DECO_FIRE` through the render mask.
 const PMODE_OPTIONS: u32 = 0x0000_F000;
@@ -248,44 +277,8 @@ const PMAP_TYPE_MASK: u32 = 0x1FF;
 /// `pmap`/`photons` shift for the `particle id + 1` field.
 const PMAP_ID_SHIFT: u32 = 9;
 
-/// Whether any cell within `radius` cells of `(cx, cy)` carries `bit`.
-///
-/// The glow gather reaches five pixels, so a 5x5 cell window (`radius == 2`)
-/// covers it; a region without a matching draw mode cannot produce output, so
-/// the pass skips it.
-#[cube]
-pub(crate) fn cell_fx_any(
-    fx_cell: &[u32],
-    cx: u32,
-    cy: u32,
-    xcells: u32,
-    ycells: u32,
-    bit: u32,
-    radius: u32,
-) -> bool {
-    let mut any = false;
-    let span = radius * 2u32 + 1u32;
-    for cj in 0u32..span {
-        for ci in 0u32..span {
-            let sx = cx as i32 + ci as i32 - radius as i32;
-            let sy = cy as i32 + cj as i32 - radius as i32;
-            if sx >= 0i32
-                && sy >= 0i32
-                && (sx as u32) < xcells
-                && (sy as u32) < ycells
-                && (fx_cell[((sy as u32) * xcells + (sx as u32)) as usize] & bit) != 0u32
-            {
-                any = true;
-            }
-        }
-    }
-    any
-}
-
-/// Clears the per-cell effect flags before the particle passes rebuild them.
-///
-/// One dispatch covers the cells, the rows and the columns: each thread clears
-/// whichever of the three it lands in.
+/// Clears the per-cell effect flags and frame summary before the particle passes
+/// rebuild them. Leaves `fx_cell[cells + 1]` (`fire_active`) intact across frames.
 #[cube(launch_unchecked)]
 pub fn clear_fx_cells_kernel(
     fx_cell: &mut [u32],
@@ -296,12 +289,110 @@ pub fn clear_fx_cells_kernel(
     yres: u32,
 ) {
     let idx = ABSOLUTE_POS as u32;
-    if idx < xcells * ycells {
+    let cells = xcells * ycells;
+    if idx < cells {
         fx_cell[idx as usize] = 0u32;
+    }
+    if idx == 0u32 {
+        fx_cell[cells as usize] = 0u32;
     }
     if idx < xres + yres {
         fx_axis[idx as usize] = 0u32;
     }
+}
+
+/// Writes `[x, y, z, 0]` into one indirect dispatch slot of `render_ctrl`.
+#[cube]
+fn write_dispatch_slot(render_ctrl: &mut [u32], slot: u32, x: u32, y: u32) {
+    let base = (slot * 4u32) as usize;
+    render_ctrl[base] = x;
+    render_ctrl[base + 1usize] = y;
+    render_ctrl[base + 2usize] = 1u32;
+    render_ctrl[base + 3usize] = 0u32;
+}
+
+/// Populates the GPU indirect-dispatch slots from the effect summary flags so
+/// unused render passes execute zero workgroups on the device.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_render_dispatch_kernel(
+    fx_cell: &mut [u32],
+    render_ctrl: &mut [u32],
+    cells: u32,
+    glow_enabled: u32,
+    rays_enabled: u32,
+    fire_enabled: u32,
+    fire_due: u32,
+    glow_x: u32,
+    glow_y: u32,
+    cell_cubes: u32,
+    pixel_cubes: u32,
+    slot_cubes: u32,
+) {
+    if ABSOLUTE_POS != 0usize {
+        terminate!();
+    }
+    let summary = fx_cell[cells as usize];
+    let fire_was_active = fx_cell[(cells + 1u32) as usize];
+
+    let do_glow = glow_enabled != 0u32 && (summary & FX_GLOW) != 0u32;
+    write_dispatch_slot(
+        render_ctrl,
+        0u32,
+        if do_glow { glow_x } else { 0u32 },
+        if do_glow { glow_y } else { 1u32 },
+    );
+
+    let do_rays = rays_enabled != 0u32 && (summary & FX_SPARK) != 0u32;
+    write_dispatch_slot(render_ctrl, 1u32, if do_rays { cell_cubes } else { 0u32 }, 1u32);
+    write_dispatch_slot(render_ctrl, 2u32, if do_rays { pixel_cubes } else { 0u32 }, 1u32);
+
+    let do_fire_matter =
+        fire_enabled != 0u32 && fire_due != 0u32 && (summary & FX_FIRE_MATTER) != 0u32;
+    let do_fire_energy =
+        fire_enabled != 0u32 && fire_due != 0u32 && (summary & FX_FIRE_ENERGY) != 0u32;
+    write_dispatch_slot(
+        render_ctrl,
+        3u32,
+        if do_fire_matter { cell_cubes } else { 0u32 },
+        1u32,
+    );
+    write_dispatch_slot(
+        render_ctrl,
+        4u32,
+        if do_fire_energy { cell_cubes } else { 0u32 },
+        1u32,
+    );
+
+    let fire_alive = fire_was_active != 0u32
+        || (fire_enabled != 0u32 && fire_due != 0u32 && (summary & FX_FIRE_ANY) != 0u32);
+    let do_spread = fire_alive && fire_enabled != 0u32 && fire_due != 0u32;
+    let do_add = fire_alive && fire_enabled != 0u32;
+    let do_decay = fire_alive && fire_due != 0u32;
+
+    write_dispatch_slot(render_ctrl, 5u32, if do_spread { pixel_cubes } else { 0u32 }, 1u32);
+    write_dispatch_slot(render_ctrl, 6u32, if do_add { pixel_cubes } else { 0u32 }, 1u32);
+    write_dispatch_slot(render_ctrl, 7u32, if do_decay { cell_cubes } else { 0u32 }, 1u32);
+    if do_decay {
+        // `render_fire_decay_kernel` restores this to `1` if any cell survives decay.
+        fx_cell[(cells + 1u32) as usize] = 0u32;
+    }
+
+    let do_stickman = (summary & FX_STICKMAN) != 0u32;
+    write_dispatch_slot(
+        render_ctrl,
+        8u32,
+        if do_stickman { slot_cubes } else { 0u32 },
+        1u32,
+    );
+}
+
+#[inline]
+fn render_dispatch_binding(handle: &Handle, slot: usize) -> BufferBinding {
+    const SLOT_BYTES: u64 = 16;
+    let start = slot as u64 * SLOT_BYTES;
+    let end = (RENDER_DISPATCH_SLOTS - slot - 1) as u64 * SLOT_BYTES;
+    handle.clone().offset_start(start).offset_end(end).binding()
 }
 
 /// Marks the rows and columns of every cell that carries [`FX_SPARK`].
@@ -463,20 +554,8 @@ fn cached_buffer(
 
 /// `true` when the cached `GpuElementProps` upload no longer matches `registry`.
 fn element_table_stale(bufs: &SimBuffers, registry: &ElementRegistry) -> bool {
-    if registry.elements.len() != bufs.elem_props_host.len() {
-        return true;
-    }
-    registry
-        .elements
-        .iter()
-        .zip(bufs.elem_props_host.iter())
-        .any(|(def, gpu)| {
-            def.colour != gpu.colour
-                || def.properties != gpu.properties
-                || def.high_temp.to_bits() != gpu.high_temp.to_bits()
-                || def.pixel_mode != gpu.pixel_mode
-                || def.fire_colour != gpu.fire_colour
-        })
+    bufs.elem_table_generation != registry.generation
+        || registry.elements.len() != bufs.elem_props_host.len()
 }
 
 /// Frame counter feeding the `SPARK`/`FLARE` flicker.
@@ -579,11 +658,6 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
     // `CubeCount` is not `Copy`, so build a fresh one per launch.
     let pixel_cubes = || CubeCount::new_1d((pixels as u32).div_ceil(RENDER_CUBE_DIM));
     let cell_cubes = || CubeCount::new_1d((cells as u32).div_ceil(RENDER_CUBE_DIM));
-    // The stickman/orbital pass only touches live slots, so it dispatches over
-    // the used prefix instead of the whole pool (a 1024x768 canvas reserves
-    // 1.57 M slots and uses a few tens of thousands).
-    let slot_cubes =
-        || CubeCount::new_1d((bufs.used_slot_bound() as u32).div_ceil(RENDER_CUBE_DIM));
 
     let fire_enabled = (render_mode & (RENDER_FIRE | RENDER_SPRK)) != 0;
     // TPT renders and simulates in lockstep, so its fire buffer advances once
@@ -646,6 +720,22 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
             );
         }
 
+        let fx_cells_len = cells + FX_SUMMARY_WORDS;
+
+        // The particle passes rebuild the per-cell effect flags below; clear
+        // before walls so electrified walls can raise `FX_FIRE_MATTER` too.
+        clear_fx_cells_kernel::launch_unchecked(
+            &bufs.client,
+            cell_cubes(),
+            cube_dim,
+            BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), fx_cells_len),
+            BufferArg::from_raw_parts(bufs.gpu_fx_axis.clone(), xres as usize + yres as usize),
+            xcells,
+            ycells,
+            xres,
+            yres,
+        );
+
         render_walls_kernel::launch_unchecked(
             &bufs.client,
             pixel_cubes(),
@@ -657,24 +747,12 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
             BufferArg::from_raw_parts(bufs.gpu_fire_r.clone(), cells),
             BufferArg::from_raw_parts(bufs.gpu_fire_g.clone(), cells),
             BufferArg::from_raw_parts(bufs.gpu_fire_b.clone(), cells),
+            BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), fx_cells_len),
             xres,
             yres,
-            xcells,
-            render_mode,
-        );
-
-        // The particle passes rebuild the per-cell effect flags below; the
-        // glow and spark gathers then skip cells that carry neither.
-        clear_fx_cells_kernel::launch_unchecked(
-            &bufs.client,
-            cell_cubes(),
-            cube_dim,
-            BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), cells),
-            BufferArg::from_raw_parts(bufs.gpu_fx_axis.clone(), xres as usize + yres as usize),
             xcells,
             ycells,
-            xres,
-            yres,
+            render_mode,
         );
 
         // `Renderer.cpp:527-538`: every attached `SOAP` bubble draws a
@@ -704,7 +782,7 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
             BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), bufs.capacity),
             BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), elem_words),
             BufferArg::from_raw_parts(bufs.gpu_framebuf.clone(), pixels),
-            BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), cells),
+            BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), fx_cells_len),
             xres,
             yres,
             render_mode,
@@ -717,9 +795,33 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
             tick,
         );
 
+        let pixel_cube_count = (pixels as u32).div_ceil(RENDER_CUBE_DIM);
+        let cell_cube_count = (cells as u32).div_ceil(RENDER_CUBE_DIM);
+        let slot_cube_count = (bufs.used_slot_bound() as u32).div_ceil(RENDER_CUBE_DIM);
+        let glow_cube_x = xres.div_ceil(16);
+        let glow_cube_y = yres.div_ceil(16);
+
+        prepare_render_dispatch_kernel::launch_unchecked(
+            &bufs.client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), fx_cells_len),
+            BufferArg::from_raw_parts(bufs.gpu_render_ctrl.clone(), RENDER_CTRL_WORDS),
+            cells as u32,
+            u32::from(glow_enabled),
+            u32::from(rays_enabled),
+            u32::from(fire_enabled),
+            u32::from(fire_due),
+            glow_cube_x,
+            glow_cube_y,
+            cell_cube_count,
+            pixel_cube_count,
+            slot_cube_count,
+        );
+
         render_stickmen_and_orbitals_kernel::launch_unchecked(
             &bufs.client,
-            slot_cubes(),
+            CubeCount::Dynamic(render_dispatch_binding(&bufs.gpu_render_ctrl, R_SLOT_STICKMAN)),
             cube_dim,
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), bufs.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), bufs.capacity),
@@ -747,8 +849,8 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
         if glow_enabled {
             render_particles_glow_kernel::launch_unchecked(
                 &bufs.client,
-                pixel_cubes(),
-                cube_dim,
+                CubeCount::Dynamic(render_dispatch_binding(&bufs.gpu_render_ctrl, R_SLOT_GLOW)),
+                CubeDim::new_2d(16, 16),
                 BufferArg::from_raw_parts(bufs.gpu_photons.clone(), pixels),
                 BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), pixels),
                 BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), bufs.capacity),
@@ -764,7 +866,7 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
                 BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), bufs.capacity),
                 BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), elem_words),
                 BufferArg::from_raw_parts(bufs.gpu_framebuf.clone(), pixels),
-                BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), cells),
+                BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), fx_cells_len),
                 xres,
                 yres,
                 render_mode,
@@ -781,9 +883,9 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
         if rays_enabled {
             build_fx_rows_kernel::launch_unchecked(
                 &bufs.client,
-                cell_cubes(),
+                CubeCount::Dynamic(render_dispatch_binding(&bufs.gpu_render_ctrl, R_SLOT_FX_ROWS)),
                 cube_dim,
-                BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), cells),
+                BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), fx_cells_len),
                 BufferArg::from_raw_parts(bufs.gpu_fx_axis.clone(), xres as usize + yres as usize),
                 xcells,
                 ycells,
@@ -793,7 +895,7 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
             let frame_seed = FRAME_SEED.fetch_add(0x9E37_79B9, Ordering::Relaxed);
             render_particles_rays_kernel::launch_unchecked(
                 &bufs.client,
-                pixel_cubes(),
+                CubeCount::Dynamic(render_dispatch_binding(&bufs.gpu_render_ctrl, R_SLOT_RAYS)),
                 cube_dim,
                 BufferArg::from_raw_parts(bufs.gpu_photons.clone(), pixels),
                 BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), pixels),
@@ -828,7 +930,10 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
         if fire_enabled && fire_due {
             render_fire_accum_matter_kernel::launch_unchecked(
                 &bufs.client,
-                cell_cubes(),
+                CubeCount::Dynamic(render_dispatch_binding(
+                    &bufs.gpu_render_ctrl,
+                    R_SLOT_FIRE_MATTER,
+                )),
                 cube_dim,
                 BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), pixels),
                 BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), bufs.capacity),
@@ -861,7 +966,10 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
 
             render_fire_accum_energy_kernel::launch_unchecked(
                 &bufs.client,
-                cell_cubes(),
+                CubeCount::Dynamic(render_dispatch_binding(
+                    &bufs.gpu_render_ctrl,
+                    R_SLOT_FIRE_ENERGY,
+                )),
                 cube_dim,
                 BufferArg::from_raw_parts(bufs.gpu_photons.clone(), pixels),
                 BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), bufs.capacity),
@@ -896,10 +1004,13 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
         // The glow gather only depends on the fire cells, which change at most
         // once per simulation tick, so it is resolved into the layer once per
         // tick and only the one-tap add runs at the present rate.
-        if fire_due {
+        if fire_due && fire_enabled {
             render_fire_spread_kernel::launch_unchecked(
                 &bufs.client,
-                pixel_cubes(),
+                CubeCount::Dynamic(render_dispatch_binding(
+                    &bufs.gpu_render_ctrl,
+                    R_SLOT_FIRE_SPREAD,
+                )),
                 cube_dim,
                 BufferArg::from_raw_parts(bufs.gpu_fire_r.clone(), cells),
                 BufferArg::from_raw_parts(bufs.gpu_fire_g.clone(), cells),
@@ -917,7 +1028,7 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
         if fire_enabled {
             render_fire_add_kernel::launch_unchecked(
                 &bufs.client,
-                pixel_cubes(),
+                CubeCount::Dynamic(render_dispatch_binding(&bufs.gpu_render_ctrl, R_SLOT_FIRE_ADD)),
                 cube_dim,
                 BufferArg::from_raw_parts(bufs.gpu_framebuf.clone(), pixels),
                 BufferArg::from_raw_parts(bufs.gpu_fire_layer.clone(), pixels),
@@ -932,11 +1043,15 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
         if fire_due {
             render_fire_decay_kernel::launch_unchecked(
                 &bufs.client,
-                cell_cubes(),
+                CubeCount::Dynamic(render_dispatch_binding(
+                    &bufs.gpu_render_ctrl,
+                    R_SLOT_FIRE_DECAY,
+                )),
                 cube_dim,
                 BufferArg::from_raw_parts(bufs.gpu_fire_r.clone(), cells),
                 BufferArg::from_raw_parts(bufs.gpu_fire_g.clone(), cells),
                 BufferArg::from_raw_parts(bufs.gpu_fire_b.clone(), cells),
+                BufferArg::from_raw_parts(bufs.gpu_fx_cell.clone(), fx_cells_len),
                 xcells,
                 ycells,
             );
@@ -973,7 +1088,10 @@ pub fn render_gpu_only(bufs: &mut SimBuffers, registry: &ElementRegistry) {
             );
         }
 
-        if warp_enabled {
+        // `grav_force_stale` is cleared whenever Newtonian gravity is off or
+        // zeroed, so skipping the copy+warp pair preserves a bit-identical
+        // framebuffer when the field is zero.
+        if warp_enabled && bufs.grav_force_stale {
             let scratch = cached_buffer(&WARP_SCRATCH_GPU, &bufs.client, pixels, None);
             copy_u32_kernel::launch_unchecked(
                 &bufs.client,

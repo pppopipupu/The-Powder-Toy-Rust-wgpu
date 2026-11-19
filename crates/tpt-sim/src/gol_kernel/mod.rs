@@ -32,22 +32,18 @@
 //!
 //! # The pass
 //!
-//! One generation is four dispatches over `xres * yres` (the last one a single
-//! thread):
+//! One generation is three dispatches over `xres * yres`:
 //!
 //! * `gol_analyze_kernel` — a **staged read** of the current map. It counts
 //!   the *live* `LIFE` neighbours of every pixel (a dying cell does not
 //!   contribute, matching `SimulateGoL`'s `tmp2 == states` guard) and runs
 //!   TPT's majority vote over the neighbouring rulesets to pick the rule a
-//!   birth would use. It writes one packed word per pixel into `gol_meta` and
-//!   clears the survivor counter.
+//!   birth would use. It writes one packed word per pixel into `gol_meta`.
 //! * `gol_update_kernel` — reads only `gol_meta`, so no thread ever observes
 //!   another thread's state change. It advances `tmp2`, kills cells and clears
 //!   the birth vote of a stasis-frozen pixel.
 //! * `gol_birth_kernel` — turns every surviving birth vote into one
 //!   `reaction_kernel::shared::request_create` record.
-//! * `gol_settle_kernel` — folds the generation's survivor/birth count into the
-//!   device arm word.
 //!
 //! Deaths are resolved on the device (`part_ty = PT_NONE`); the movement pass
 //! rebuilds `pmap` from the pool afterwards, so no map write is needed.
@@ -61,15 +57,12 @@
 //! particle, map or counter is copied back to the host.
 //!
 //! The reference gates the call on `elementCount[PT_LIFE] > 0`, a counter it
-//! maintains on create/kill. The port keeps that decision on the device:
-//! `counters[0]` is an arm word the host sets with a one-word upload when it
-//! paints `LIFE`, restores a save or sees [`SimBuffers::active_count`] change,
-//! and `gol_settle_kernel` keeps it set while a generation leaves a survivor or
-//! queues a birth. Every per-pixel stage reads the word first and terminates
-//! immediately when it is clear, so a simulation without `LIFE` pays one atomic
-//! load per thread and no host read-back. The periodic detection probe
-//! ([`GOL_PROBE_INTERVAL`]) re-arms the word in case a device-side creation was
-//! missed by the host signals.
+//! maintains on create/kill. The port keeps that decision on the device: the
+//! active-element mask refreshed by `thermal_kernel::refresh_pmap_types_kernel`
+//! feeds the `SIM_SLOT_GOL_PIX` indirect-dispatch slot, so a step without a live
+//! `LIFE` launches zero workgroups and costs no host read-back. The host-side
+//! `has_seen_elem(PT_LIFE)` check only skips the whole group when `LIFE` has
+//! never been introduced, since nothing else can synthesise it.
 //!
 //! `GSPEED` (frames per generation, default `1`) is not exposed by the port, so
 //! one generation runs per frame.
@@ -117,14 +110,8 @@ const _: () = assert!(WL_STASIS_U32 == 18);
 const PMAP_TYPE_MASK: u32 = 0x1FF;
 const _: () = assert!(PMAP_TYPE_MASK == 0x1FF);
 
-/// `[armed, survivor_count]`. The arm word gates every per-pixel stage; the
-/// survivor word is the sum the update and birth stages add to and the settle
-/// stage folds back into the arm word. Neither is ever read by the host.
-const COUNTER_WORDS: usize = 2;
 /// Work units per worker cube.
 const CUBE_DIM: u32 = 256;
-/// Frames between detection probes while the device arm word is clear.
-pub const GOL_PROBE_INTERVAL: u32 = 30;
 
 // `gol_meta` word layout: the neighbour count sits in the low nibble, three
 // flags follow it and the 23-bit payload starts at bit 7.

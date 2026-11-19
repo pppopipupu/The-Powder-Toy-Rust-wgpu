@@ -59,10 +59,18 @@
 //! * Particle *death* is simply `part_ty = PT_NONE`; the next particle
 //!   read-back reconciles the pool, so no explicit free-list bookkeeping is
 //!   required on the device.
+//! * Every pass that is driven by a fixed element set is dispatched through
+//!   [`dispatch::sim_grid`], an indirect dispatch built on the device from the
+//!   live element mask (`dispatch::prepare_sim_dispatch`). A pass whose
+//!   elements are absent launches zero workgroups without a host read-back;
+//!   `SimBuffers::host_seen_elem_mask` adds a cheaper host-side skip for
+//!   closed subsystems that no other pass can create (`gol`, `love`, `pipe`,
+//!   `portals`, `rays`, `stickman`, `force`, `inst`, `modext`, `bism`).
 
 mod bism;
 mod combustion;
 mod corrosion;
+pub(crate) mod dispatch;
 mod electronics;
 mod energy;
 pub(crate) mod energy_entry;
@@ -90,6 +98,14 @@ use tpt_core::elements::ElementRegistry;
 
 use crate::buffers::SimBuffers;
 
+pub use dispatch::{SIM_DISPATCH_WORDS, build_sim_dispatch_lut};
+
+use dispatch::{
+    SIM_SLOT_BANG, SIM_SLOT_CBNW, SIM_SLOT_COMB_EXPLOSIVE_PIX, SIM_SLOT_ELEC_LSNS,
+    SIM_SLOT_ELEC_SENSORS, SIM_SLOT_EMP, SIM_SLOT_EXOT_SOAP_SLOT, SIM_SLOT_FIRW,
+    SIM_SLOT_FUSE_GROUP, SIM_SLOT_GEL, SIM_SLOT_GLAS, SIM_SLOT_LIGH, SIM_SLOT_O2,
+    SIM_SLOT_REACTIVE, SIM_SLOT_SOAP_PIX, sim_grid,
+};
 use shared::{
     CREATE_QUEUE_WORDS, ELEM_PROP_WORDS, drain_gpu_creates, launch_grid, refresh_gpu_free_slots,
     reset_gpu_create_queue,
@@ -290,7 +306,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::carbonated_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_CBNW),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -312,7 +328,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::glass_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_GLAS),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -336,7 +352,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::o2_burst_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_O2),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -367,7 +383,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::firework_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_FIRW),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -401,7 +417,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::reactive_liquid_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_REACTIVE),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -431,10 +447,11 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     }
 
     // `SOAP` bubble state, then the slot-parallel spring.
+    let soap_pix_grid = sim_grid(bufs, SIM_SLOT_SOAP_PIX);
     unsafe {
         combustion::soap_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            soap_pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -462,7 +479,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::soap_detach_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            soap_pix_grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -479,12 +496,13 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
             ycells,
         );
     }
-    let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
+    let (_slot_cubes, slot_dim) = launch_grid(dims.used_slots);
+    let exot_soap_slot_grid = sim_grid(bufs, SIM_SLOT_EXOT_SOAP_SLOT);
     // Cold `EXOT` freezes in place (`EXOT.cpp:200-210`).
     unsafe {
         combustion::exot_freeze_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
+            exot_soap_slot_grid.clone(),
             CubeDim::new_1d(slot_dim),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
@@ -497,7 +515,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::soap_spring_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
+            exot_soap_slot_grid,
             CubeDim::new_1d(slot_dim),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
@@ -517,7 +535,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::gel_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_GEL),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -533,10 +551,11 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     }
 
     // `LIGH`: heating and ignition first, then the segment state machine.
+    let ligh_grid = sim_grid(bufs, SIM_SLOT_LIGH);
     unsafe {
         combustion::ligh_heat_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            ligh_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -559,7 +578,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::ligh_prop_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            ligh_grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -578,17 +597,11 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     }
 
     // `BANG.cpp:74-80`: `flood_prop(x, y, FIELD_TMP, 2)` arms the whole
-    // connected run of `BANG` in one call. `flood_component`'s seed scan queues
-    // every fresh seed (`tmp == 1`) and its drain walks the 4-connected run in
-    // the same frame. The drain writes the `BANG_ARMED_NEXT_FRAME` /
-    // `BANG_REARMED` sentinels rather than the final `2`, because it runs
-    // before the explosive pass: `explosive_reaction_kernel` turns them into
-    // `2`, and only the pixels that were already at `2` advance to `3` this
-    // frame, so a run armed by the flood detonates on the same tick as the seed
-    // that started it.
-    flood_component::launch_seed_scan(
+    // connected run of `BANG` in one call.
+    flood_component::launch_seed_scan_with_grid(
         bufs,
         dims,
+        sim_grid(bufs, SIM_SLOT_BANG),
         flood_component::FLOOD_FIELD_TMP,
         1i32,
         1i32,
@@ -607,7 +620,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::explosive_reaction_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_COMB_EXPLOSIVE_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -628,11 +641,12 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
         );
     }
 
-    // `FUSE` / `FSEP` / `IGNT`.
+    // `FUSE` / `FSEP` / `IGNT`, `ANAR` / `BOYL` / `C5`, `THRM`, `TRON`.
+    let fuse_group_grid = sim_grid(bufs, SIM_SLOT_FUSE_GROUP);
     unsafe {
         combustion::fuse_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            fuse_group_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -652,7 +666,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::pressure_gas_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            fuse_group_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -672,7 +686,7 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         combustion::thermite_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            fuse_group_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -689,46 +703,50 @@ fn launch_combustion_pass(bufs: &SimBuffers, dims: &PassDims) {
     }
 
     // `TRON`.
-    unsafe {
-        combustion::tron_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_wall_bmap.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-            ycells,
-            dims.frame_seed,
-        );
+    if bufs.has_seen_elem(PT_TRON) {
+        unsafe {
+            combustion::tron_kernel::launch_unchecked(
+                &bufs.client,
+                fuse_group_grid,
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_wall_bmap.clone(), dims.cells),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+                ycells,
+                dims.frame_seed,
+            );
+        }
     }
 
     // `EMP` pulse (slot parallel, inert unless a fresh EMP latched a pulse).
-    unsafe {
-        combustion::emp_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
-            CubeDim::new_1d(slot_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
-            dims.xres,
-            dims.yres,
-            dims.used_slots as u32,
-            dims.frame_seed,
-        );
+    if bufs.has_seen_elem(PT_EMP) {
+        unsafe {
+            combustion::emp_kernel::launch_unchecked(
+                &bufs.client,
+                sim_grid(bufs, SIM_SLOT_EMP),
+                CubeDim::new_1d(slot_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
+                dims.xres,
+                dims.yres,
+                dims.used_slots as u32,
+                dims.frame_seed,
+            );
+        }
     }
 }
 
@@ -905,79 +923,81 @@ fn launch_electronics_passes(bufs: &SimBuffers, dims: &PassDims) {
         );
     }
 
-    // 6.5 `PSNS` (`FILT` broadcast) and `LSNS` (life scan). Two launches, five
-    // and seven storage buffers, so both stay inside the device limit.
-    unsafe {
-        electronics::sensor_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-        );
-    }
-    unsafe {
-        electronics::light_sensor_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            dims.xres,
-            dims.yres,
-        );
-    }
+    // 6.5 `PSNS`, `LSNS`, `TSNS`, `VSNS`.
+    if bufs.has_seen_any(&[PT_PSNS, PT_LSNS, PT_TSNS, PT_VSNS]) {
+        let sensor_grid = sim_grid(bufs, SIM_SLOT_ELEC_SENSORS);
+        unsafe {
+            electronics::sensor_kernel::launch_unchecked(
+                &bufs.client,
+                sensor_grid.clone(),
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+            );
+        }
+        unsafe {
+            electronics::light_sensor_kernel::launch_unchecked(
+                &bufs.client,
+                sensor_grid.clone(),
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                dims.xres,
+                dims.yres,
+            );
+        }
 
-    // 6.5b `TSNS` and `VSNS`: the spark latch, the temperature / velocity scan
-    // and the `FILT` chain serialisation (`TSNS.cpp`, `VSNS.cpp`).
-    unsafe {
-        electronics::temp_sensor_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
-            dims.xres,
-            dims.yres,
-        );
-    }
-    unsafe {
-        electronics::velocity_sensor_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
-            dims.xres,
-            dims.yres,
-        );
+        // 6.5b `TSNS` and `VSNS`: the spark latch, the temperature / velocity scan
+        // and the `FILT` chain serialisation (`TSNS.cpp`, `VSNS.cpp`).
+        unsafe {
+            electronics::temp_sensor_kernel::launch_unchecked(
+                &bufs.client,
+                sensor_grid.clone(),
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
+                dims.xres,
+                dims.yres,
+            );
+        }
+        unsafe {
+            electronics::velocity_sensor_kernel::launch_unchecked(
+                &bufs.client,
+                sensor_grid,
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
+                dims.xres,
+                dims.yres,
+            );
+        }
     }
 
     unsafe {
@@ -1027,29 +1047,31 @@ fn launch_electronics_passes(bufs: &SimBuffers, dims: &PassDims) {
         );
     }
 
-    // 6.8 `LSNS` modes 1 and 3 (`FILT` life serialisation). Separate launch:
-    // `sensor_kernel` above binds six buffers and has no room for the
-    // cross-pixel `ctype` writes this mode performs.
-    unsafe {
-        electronics::lsns_filter_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            dims.xres,
-            dims.yres,
-        );
+    // 6.8 `LSNS` modes 1 and 3 (`FILT` life serialisation).
+    if bufs.has_seen_elem(PT_LSNS) {
+        unsafe {
+            electronics::lsns_filter_kernel::launch_unchecked(
+                &bufs.client,
+                sim_grid(bufs, SIM_SLOT_ELEC_LSNS),
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                dims.xres,
+                dims.yres,
+            );
+        }
     }
 
     // 6.9 `ETRD` plasma bolts. Pushes `PLSM` creations into the queue; the drain
     // in `step_reactions_gpu` allocates them after the reaction passes.
-    electronics::bolt::launch_etrd_bolt_pass(bufs, dims);
+    if bufs.has_seen_elem(PT_ETRD) {
+        electronics::bolt::launch_etrd_bolt_pass(bufs, dims);
+    }
 
     unsafe {
         electronics::detector_kernel::launch_unchecked(
@@ -1137,6 +1159,9 @@ pub fn step_reactions_gpu(bufs: &mut SimBuffers, registry: &ElementRegistry, fra
 
     // The creation queue is per-frame: empty it before any pass can push.
     reset_gpu_create_queue(bufs);
+    // Populate the indirect dispatch table from the active-element bitmask
+    // built by `thermal_kernel::refresh_pmap_types_kernel`.
+    dispatch::prepare_sim_dispatch(bufs, &dims);
 
     // `Simulation::BeforeSim` runs the LOVE/LOLZ block scan before the `WIRE`
     // tally (`Simulation.cpp:3862`) and before every element update, so it sees
@@ -1144,11 +1169,15 @@ pub fn step_reactions_gpu(bufs: &mut SimBuffers, registry: &ElementRegistry, fra
     // reaction step for the same reason: a pass that has already killed a
     // particle leaves its `pmap` word behind, and that cell must still look
     // occupied to the rule table here.
-    love::launch(bufs, &dims);
+    if bufs.has_seen_any(&[PT_LOVE, PT_LOLZ]) {
+        love::launch(bufs, &dims);
+    }
     launch_life_pass(bufs, &dims);
     launch_combustion_pass(bufs, &dims);
     launch_fluid_pass(bufs, &dims);
-    glow::launch(bufs, &dims);
+    if bufs.has_seen_elem(PT_GLOW) {
+        glow::launch(bufs, &dims);
+    }
     corrosion::launch_corrosion_pass(bufs, &dims);
     launch_energy_pass(bufs, &dims);
     neut::launch(bufs, &dims);
@@ -1158,20 +1187,42 @@ pub fn step_reactions_gpu(bufs: &mut SimBuffers, registry: &ElementRegistry, fra
     // The port's `BISM` pass: oxidation chemistry, burning, the thermocouple
     // and the melt crystallisation request. Runs before the spawn expansion so
     // its creations drain in this tick.
-    bism::launch(bufs, &dims);
+    if bufs.has_seen_elem(PT_BISM) {
+        bism::launch(bufs, &dims);
+    }
     // The second element set (ids `195..=238`). It runs before the force gather
     // and before the spawn expansion, so its creations drain in this tick.
     modext::launch(bufs, &dims, frame_seed);
-    force::launch(bufs, &dims);
-    pipe::launch(bufs, &dims);
+    if bufs.has_seen_any(&[PT_ACEL, PT_DCEL, PT_RPEL, PT_FRAY, PT_HEAC, PT_DMG]) {
+        force::launch(bufs, &dims);
+    }
+    if bufs.has_seen_any(&[PT_PIPE, PT_PPIP]) {
+        pipe::launch(bufs, &dims);
+    }
     spawn::expand_spawn_requests(bufs, &dims);
     refresh_gpu_free_slots(bufs);
     // Every creation the passes above asked for is allocated here, before the
     // passes that allocate from the device window themselves.
     drain_gpu_creates(bufs, &dims);
-    portals::launch(bufs, &dims);
-    rays::launch(bufs, &dims);
-    stickman::launch(bufs, &dims);
+
+    let has_portals = bufs.has_seen_any(&[PT_PRTI, PT_PRTO, PT_WIFI, PT_PPTI, PT_PPTO]);
+    let has_rays = bufs.has_seen_any(&[PT_ARAY, PT_DRAY, PT_PSTN, PT_FRME]);
+    let has_stickman = bufs.has_seen_any(&[PT_STKM, PT_STKM2, PT_FIGH, PT_SPAWN, PT_SPAWN2]);
+    let has_gol = bufs.has_seen_elem(PT_LIFE);
+    if has_portals || has_rays || has_stickman || has_gol {
+        // Refresh the indirect dispatch table so post-drain passes immediately
+        // observe element types created during this tick.
+        dispatch::prepare_sim_dispatch(bufs, &dims);
+    }
+    if has_portals {
+        portals::launch(bufs, &dims);
+    }
+    if has_rays {
+        rays::launch(bufs, &dims);
+    }
+    if has_stickman {
+        stickman::launch(bufs, &dims);
+    }
     launch_wall_pass(bufs, &dims);
 
     // They run after the life timers, which may have just killed particles,

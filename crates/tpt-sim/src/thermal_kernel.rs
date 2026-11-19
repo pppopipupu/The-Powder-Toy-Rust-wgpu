@@ -1323,20 +1323,39 @@ pub fn phase_transition_kernel(
 /// The `pmap` word is `(part_id + 1) << 9 | type`, so a transition invalidates
 /// it until the next full rebuild. This kernel is cheap and idempotent: it only
 /// touches words that are still owned by the particle and whose type differs.
+/// Clears the 256-bit active element mask before [`refresh_pmap_types_kernel`] rebuilds it.
+#[cube(launch_unchecked)]
+pub fn clear_elem_mask_kernel(elem_mask: &mut [u32]) {
+    let tid = UNIT_POS_X as usize;
+    if tid < 8usize {
+        elem_mask[tid] = 0u32;
+    }
+}
+
+/// Republishes the element-type half of every `pmap` word whose particle changed
+/// type during this pass and builds the 256-bit active element bitmask.
 #[cube(launch_unchecked)]
 pub fn refresh_pmap_types_kernel(
     pmap: &mut [u32],
     part_ty: &[u32],
     part_x: &[f32],
     part_y: &[f32],
+    elem_mask: &mut [Atomic<u32>],
     slot_count: u32,
     xres: u32,
     yres: u32,
 ) {
     let i = ABSOLUTE_POS;
+    let tid = UNIT_POS_X as usize;
+    let mut sm = Shared::<[u32]>::new_slice(2048usize);
+    for w in 0usize..8usize {
+        sm[w * 256usize + tid] = 0u32;
+    }
     if i < slot_count as usize {
         let ty = part_ty[i];
-        if ty != PT_NONE_U32 {
+        if ty != PT_NONE_U32 && ty < PT_NUM_U32 {
+            let w = (ty >> 5u32) as usize;
+            sm[w * 256usize + tid] = 1u32 << (ty & 31u32);
             let x = part_x[i] as i32;
             let y = part_y[i] as i32;
             if x >= 0i32 && x < xres as i32 && y >= 0i32 && y < yres as i32 {
@@ -1346,6 +1365,23 @@ pub fn refresh_pmap_types_kernel(
                     pmap[pidx] = ((i as u32 + 1u32) << 9u32) | (ty & 0x1FFu32);
                 }
             }
+        }
+    }
+    sync_cube();
+    let mut s = 128usize;
+    while s > 0usize {
+        if tid < s {
+            for w in 0usize..8usize {
+                sm[w * 256usize + tid] |= sm[w * 256usize + tid + s];
+            }
+        }
+        sync_cube();
+        s /= 2usize;
+    }
+    if tid < 8usize {
+        let word = sm[tid * 256usize];
+        if word != 0u32 {
+            elem_mask[tid].fetch_or(word);
         }
     }
 }
@@ -1657,6 +1693,13 @@ pub fn step_thermal_and_transitions_gpu(
             frame_seed,
         );
 
+        clear_elem_mask_kernel::launch_unchecked(
+            &client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(8),
+            BufferArg::from_raw_parts(bufs.gpu_elem_mask.clone(), 8),
+        );
+
         refresh_pmap_types_kernel::launch_unchecked(
             &client,
             CubeCount::Static(blocks, 1, 1),
@@ -1665,6 +1708,7 @@ pub fn step_thermal_and_transitions_gpu(
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), capacity),
+            BufferArg::from_raw_parts(bufs.gpu_elem_mask.clone(), 8),
             slot_count,
             xres,
             yres,

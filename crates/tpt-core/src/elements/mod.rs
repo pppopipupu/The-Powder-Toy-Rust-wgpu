@@ -574,6 +574,9 @@ pub struct ElementRegistry {
     /// Flat `[PT_NUM * PT_NUM]` matrix indexed by `moving_ty * PT_NUM + dest_ty`.
     /// `0` = blocked, `1` = swap, `2` = share the cell, `3` = special handling.
     pub can_move: Vec<u8>,
+    /// Monotonic revision counter bumped whenever definitions or `can_move`
+    /// change, allowing GPU table syncs to skip redundant full-table scans.
+    pub generation: u64,
 }
 
 impl Default for ElementRegistry {
@@ -598,9 +601,17 @@ impl ElementRegistry {
         let mut registry = Self {
             elements,
             can_move: Vec::new(),
+            generation: 0,
         };
         registry.rebuild_can_move();
         registry
+    }
+
+    /// Advances [`Self::generation`] after a table or property mutation.
+    #[inline]
+    pub fn bump_generation(&mut self) {
+        // Reserve `0` for uninitialized GPU cache slots.
+        self.generation = self.generation.wrapping_add(1).max(1);
     }
 
     /// Returns the definition for `id`, falling back to `PT_NONE` for ids
@@ -616,7 +627,13 @@ impl ElementRegistry {
     /// Mutable access to a definition, `None` when `id` is out of range.
     #[inline]
     pub fn get_mut(&mut self, id: u32) -> Option<&mut ElementDef> {
-        self.elements.get_mut(id as usize)
+        let idx = id as usize;
+        if idx < self.elements.len() {
+            self.bump_generation();
+            self.elements.get_mut(idx)
+        } else {
+            None
+        }
     }
 
     /// Case-insensitive lookup by display name (`"DUST"`) or identifier
@@ -845,6 +862,7 @@ impl ElementRegistry {
         table[pair(PT_ELEC, PT_RSSS)] = 2;
 
         self.can_move = table;
+        self.bump_generation();
     }
 
     /// Reads one entry of the displacement matrix. Out-of-range ids are

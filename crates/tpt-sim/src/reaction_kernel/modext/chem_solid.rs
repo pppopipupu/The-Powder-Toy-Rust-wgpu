@@ -1065,11 +1065,13 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
     }
     let xcells = dims.xcells as u32;
     let ycells = (dims.cells / dims.xcells as usize) as u32;
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let pix_grid =
+        super::super::dispatch::sim_grid(bufs, super::super::dispatch::SIM_SLOT_MODEXT_PIX);
     unsafe {
         chem_solid_update_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -1094,7 +1096,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
         );
         chem_solid_burn_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -1120,7 +1122,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
         );
         alum_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),

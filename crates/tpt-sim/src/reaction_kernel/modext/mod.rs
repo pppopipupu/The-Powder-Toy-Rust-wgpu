@@ -78,7 +78,12 @@ fn clear_elem_block_kernel(
 /// [`super::force::launch`]: the creation queue is still armed, so records the
 /// group passes queue are allocated by the same tick's
 /// [`super::shared::drain_gpu_creates`].
-pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
+pub(crate) fn launch(bufs: &mut SimBuffers, dims: &PassDims, seed: u32) {
+    let has_modext = bufs.has_seen_modext();
+    if !has_modext && !bufs.modext_block_dirty {
+        return;
+    }
+
     // The groups below stamp the element-driven block masks and queue the
     // one-shot gravity mass overrides during this tick; start from zero so a
     // stamp or an injection lives exactly one frame.
@@ -95,6 +100,11 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
             dims.cells as u32,
         );
     }
+    if !has_modext {
+        bufs.modext_block_dirty = false;
+        return;
+    }
+    bufs.modext_block_dirty = true;
 
     thermo::launch(bufs, dims, seed);
     conductors::launch(bufs, dims, seed);

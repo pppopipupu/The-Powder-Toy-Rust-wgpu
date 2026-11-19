@@ -36,6 +36,7 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_BISM, sim_grid};
 use super::shared::{
     CREATE_QUEUE_WORDS, hash_u32, launch_grid, mix_index, pmap_at, pmap_slot, request_create_plain,
 };
@@ -455,11 +456,11 @@ fn bism_molten_update(
 
 /// Launch the `BISM` pass for one frame.
 pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
     unsafe {
         bism_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_BISM),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),

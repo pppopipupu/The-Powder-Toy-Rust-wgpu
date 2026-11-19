@@ -428,7 +428,9 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
     if dims.used_slots == 0 || dims.capacity == 0 || dims.pixels == 0 {
         return;
     }
-    let (cubes, dim) = launch_grid(dims.used_slots);
+    let (_cubes, dim) = launch_grid(dims.used_slots);
+    let slot_grid =
+        super::super::dispatch::sim_grid(bufs, super::super::dispatch::SIM_SLOT_MODEXT_SLOT);
     let used = dims.used_slots as u32;
     // `Simulation.cpp:1875` gates the spark's heat bump on `!legacy_enable`;
     // the port models legacy mode as "heat conduction off" (as the nuclear
@@ -437,7 +439,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
     unsafe {
         uvrd_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            slot_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -456,7 +458,7 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, seed: u32) {
         );
         sun_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            slot_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),

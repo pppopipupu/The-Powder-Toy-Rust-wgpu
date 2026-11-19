@@ -81,7 +81,7 @@ fn main() {
         println!("{WINDOW_TITLE}");
         println!();
         println!(
-            "Usage: tpt-app [--headless-smoke] [--windowed-smoke [frames]] [--voxel-windowed-smoke [frames]] [--bench [ticks]]"
+            "Usage: tpt-app [--headless-smoke] [--windowed-smoke [frames]] [--voxel-windowed-smoke [frames]] [--bench [ticks]] [--windowed-bench [seconds]]"
         );
         println!();
         println!(
@@ -101,6 +101,13 @@ fn main() {
         println!("                    --canvas WxH picks the canvas size,");
         println!("                    --scene NAME picks empty, fluids, fluids+rigid, plasma,");
         println!("                    plasma-fancy or a comma-separated list of them.");
+        println!(
+            "  --windowed-bench [seconds]  Open a real window with a large canvas (default"
+        );
+        println!(
+            "                    1920x1080) and measure live FPS/TPS across scenes."
+        );
+        println!("                    Supports --canvas WxH, --scene NAME, --vsync, --tps-cap N.");
         println!(
             "  --save-smoke [side]  Create a {SAVE_SMOKE_SIDE}x{SAVE_SMOKE_SIDE} canvas, save it,"
         );
@@ -142,6 +149,61 @@ fn main() {
         std::process::exit(run_bench(ticks, canvas, &scenes));
     }
 
+    if let Some(pos) = args.iter().position(|arg| arg == "--windowed-bench") {
+        let secs = args
+            .get(pos + 1)
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|&v| v > 0.0)
+            .unwrap_or(3.0);
+        let canvas = match parse_bench_canvas(&args) {
+            Ok(canvas) => {
+                if args.iter().any(|a| a == "--canvas") {
+                    canvas
+                } else {
+                    (1920, 1080)
+                }
+            }
+            Err(err) => {
+                eprintln!("[windowed-bench] FAIL: {err}");
+                std::process::exit(2);
+            }
+        };
+        let scenes = match parse_bench_scenes(&args) {
+            Ok(scenes) => scenes,
+            Err(err) => {
+                eprintln!("[windowed-bench] FAIL: {err}");
+                std::process::exit(2);
+            }
+        };
+        let vsync = args.iter().any(|arg| arg == "--vsync");
+        let hud = !args.iter().any(|arg| arg == "--no-hud");
+        let tps_cap = args
+            .iter()
+            .position(|arg| arg == "--tps-cap")
+            .and_then(|p| args.get(p + 1))
+            .and_then(|v| {
+                if v == "uncapped" {
+                    Some(2.0)
+                } else {
+                    v.parse::<f32>().ok()
+                }
+            })
+            .unwrap_or(2.0);
+        let cfg = WindowedBenchConfig {
+            secs_per_scene: secs,
+            canvas,
+            scenes,
+            vsync,
+            hud,
+            tps_cap,
+        };
+        if let Err(err) = run_windowed_bench(cfg) {
+            eprintln!("[windowed-bench] FAIL: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let windowed_smoke = args
         .iter()
         .position(|arg| arg == "--windowed-smoke")
@@ -164,6 +226,30 @@ fn main() {
         eprintln!("{}", t_fmt("app.fatal_error", &[&err]));
         std::process::exit(1);
     }
+}
+
+/// Configuration for `--windowed-bench`.
+#[derive(Clone, Debug)]
+pub(crate) struct WindowedBenchConfig {
+    pub secs_per_scene: f64,
+    pub canvas: (u32, u32),
+    pub scenes: Vec<BenchScene>,
+    pub vsync: bool,
+    pub hud: bool,
+    pub tps_cap: f32,
+}
+
+fn run_windowed_bench(cfg: WindowedBenchConfig) -> Result<(), String> {
+    let prefs = crate::prefs::Prefs::load();
+    crate::i18n::set_language(prefs.language);
+    let event_loop = EventLoop::new()
+        .map_err(|err| t_fmt("app.event_loop_create_failed", &[&err.to_string()]))?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = PowderToyApp::new_windowed_bench(cfg);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|err| t_fmt("app.event_loop_run_failed", &[&err.to_string()]))
 }
 
 /// Creates the event loop and runs the interactive application until the user
@@ -357,7 +443,7 @@ fn create_headless_gpu(label: &str) -> Result<HeadlessGpu, String> {
 
 /// Scenes the benchmark can seed on a canvas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BenchScene {
+pub(crate) enum BenchScene {
     Empty,
     Fluids,
     FluidsRigid,
@@ -379,7 +465,7 @@ const BENCH_SCENES: [BenchScene; 4] = [
 ];
 
 impl BenchScene {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             BenchScene::Empty => "empty",
             BenchScene::Fluids => "fluids",
@@ -389,7 +475,7 @@ impl BenchScene {
         }
     }
 
-    fn render_mode(self) -> u32 {
+    pub(crate) fn render_mode(self) -> u32 {
         match self {
             BenchScene::PlasmaFancy => RENDER_FANCY,
             _ => RENDER_DEFAULT,
@@ -397,12 +483,12 @@ impl BenchScene {
     }
 
     /// Plasma dies within ~200 ticks, so the timed loop re-seeds it.
-    fn keeps_plasma(self) -> bool {
+    pub(crate) fn keeps_plasma(self) -> bool {
         matches!(self, BenchScene::Plasma | BenchScene::PlasmaFancy)
     }
 
     /// Populates a freshly cleared canvas.
-    fn seed(self, state: &mut AppState, width: u32, height: u32) {
+    pub(crate) fn seed(self, state: &mut AppState, width: u32, height: u32) {
         match self {
             BenchScene::Empty => {}
             BenchScene::Fluids => seed_bench_scene(state, width, height, false),
@@ -494,16 +580,16 @@ fn run_bench(ticks: u32, canvas: (u32, u32), scenes: &[BenchScene]) -> i32 {
 }
 
 /// Per-frame timing spread in milliseconds.
-struct BenchStats {
-    mean: f64,
-    p50: f64,
-    p95: f64,
-    min: f64,
-    max: f64,
+pub(crate) struct BenchStats {
+    pub(crate) mean: f64,
+    pub(crate) p50: f64,
+    pub(crate) p95: f64,
+    pub(crate) min: f64,
+    pub(crate) max: f64,
 }
 
 impl BenchStats {
-    fn from_samples(mut samples: Vec<Duration>) -> Self {
+    pub(crate) fn from_samples(mut samples: Vec<Duration>) -> Self {
         if samples.is_empty() {
             return Self {
                 mean: 0.0,
@@ -706,7 +792,7 @@ fn seed_bench_scene(state: &mut AppState, width: u32, height: u32, with_rigid: b
 }
 
 /// Fills the upper-middle of the canvas with plasma for the `plasma` bench scene.
-fn seed_bench_plasma(state: &mut AppState, width: u32, height: u32) {
+pub(crate) fn seed_bench_plasma(state: &mut AppState, width: u32, height: u32) {
     let width = width as i32;
     let height = height as i32;
     let mut points = Vec::new();

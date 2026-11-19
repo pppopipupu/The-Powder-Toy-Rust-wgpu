@@ -548,6 +548,63 @@ pub(crate) fn effective_pixel_mode(
     mode
 }
 
+/// Fast conservative check for whether a particle of element `ty` with static
+/// table flags `static_pixel_mode` can ever yield a `FIREMODE` bit in
+/// [`effective_pixel_mode`].
+///
+/// Mirrors the dynamic `FIRE_*` branches in `element_pixel_mode`,
+/// `modext_pixel_mode`, and `PIPE`/`PPIP` cargo forwarding; `fallback` and
+/// `COLOUR_*` rewrites only ever strip `FIREMODE` bits, never add them.
+#[cube]
+pub(crate) fn may_emit_fire(ty: u32, static_pixel_mode: u32) -> bool {
+    let mut emits = (static_pixel_mode & FIREMODE) != 0u32;
+    if ty == PT_PIPE
+        || ty == PT_PPIP
+        || ty == PT_DEUT
+        || ty == PT_GRAV
+        || ty == PT_VIBR
+        || ty == PT_BVBR
+        || ty == PT_GLOW
+        || ty == PT_EXOT
+        || ty == PT_ROCK
+        || ty == PT_EMBR
+        || ty == PT_TUNG
+        || ty == PT_BIZR
+        || ty == PT_BIZRG
+        || ty == PT_BIZRS
+        || ty == PT_C5
+        || ty == PT_TRON
+        || ty == PT_BRCK
+        || ty == PT_SPRK
+        || ty == PT_NEUT
+        || ty == PT_ELEC
+        || ty == PT_PROT
+        || ty == PT_VRSG
+        || ty == PT_THDR
+        || ty == PT_SMKE
+        || ty == PT_GRVT
+        || ty == PT_CFLM
+        || ty == PT_HFLM
+        || ty == PT_PHOT
+        || ty == PT_ACTY
+        || ty == PT_BFLM
+        || ty == PT_CHLR
+        || ty == PT_CLUD
+        || ty == PT_COPR
+        || ty == PT_DFOM
+        || ty == PT_LED
+        || ty == PT_PHOS
+        || ty == PT_PPTI
+        || ty == PT_PPTO
+        || ty == PT_RADN
+        || ty == PT_SUN
+        || ty == PT_TIMC
+    {
+        emits = true;
+    }
+    emits
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn host_element_pixel_mode(
@@ -579,8 +636,57 @@ pub fn host_element_pixel_mode(
 }
 
 #[cfg(test)]
+pub fn host_may_emit_fire(ty: u32, static_pixel_mode: u32) -> bool {
+    (static_pixel_mode & FIREMODE) != 0
+        || matches!(
+            ty,
+            PT_PIPE
+                | PT_PPIP
+                | PT_DEUT
+                | PT_GRAV
+                | PT_VIBR
+                | PT_BVBR
+                | PT_GLOW
+                | PT_EXOT
+                | PT_ROCK
+                | PT_EMBR
+                | PT_TUNG
+                | PT_BIZR
+                | PT_BIZRG
+                | PT_BIZRS
+                | PT_C5
+                | PT_TRON
+                | PT_BRCK
+                | PT_SPRK
+                | PT_NEUT
+                | PT_ELEC
+                | PT_PROT
+                | PT_VRSG
+                | PT_THDR
+                | PT_SMKE
+                | PT_GRVT
+                | PT_CFLM
+                | PT_PHOT
+                | PT_ACTY
+                | PT_BFLM
+                | PT_CHLR
+                | PT_CLUD
+                | PT_COPR
+                | PT_DFOM
+                | PT_LED
+                | PT_PHOS
+                | PT_PPTI
+                | PT_PPTO
+                | PT_RADN
+                | PT_SUN
+                | PT_TIMC
+        )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use tpt_core::elements::ElementRegistry;
 
     #[test]
     fn test_phot_mode_decision() {
@@ -596,5 +702,45 @@ mod tests {
         assert_eq!(mode_with & PMODE_FLAT, 0);
         assert_ne!(mode_with & (FIRE_ADD | PMODE_ADD), 0);
         assert_eq!(mode_with & NO_DECO, 0);
+    }
+
+    #[test]
+    fn test_may_emit_fire_covers_static_and_dynamic_fire_elements() {
+        let reg = ElementRegistry::new_default();
+        for id in 1..BUILTIN_ELEMENT_COUNT as u32 {
+            let def = reg.get(id);
+            if (def.pixel_mode & FIREMODE) != 0 {
+                assert!(
+                    host_may_emit_fire(id, def.pixel_mode),
+                    "static FIREMODE element {} ({}) must be recognized by may_emit_fire",
+                    id,
+                    def.name
+                );
+            }
+        }
+        // Elements that gain FIRE_* dynamically even when static pixel_mode has no FIREMODE bit.
+        for dynamic_ty in [
+            PT_PIPE, PT_PPIP, PT_DEUT, PT_GRAV, PT_VIBR, PT_BVBR, PT_GLOW, PT_EXOT, PT_ROCK,
+            PT_EMBR, PT_TUNG, PT_BIZR, PT_BIZRG, PT_BIZRS, PT_C5, PT_TRON, PT_BRCK, PT_SPRK,
+            PT_NEUT, PT_ELEC, PT_PROT, PT_VRSG, PT_THDR, PT_SMKE, PT_GRVT, PT_CFLM, PT_HFLM,
+            PT_PHOT, PT_ACTY, PT_BFLM, PT_CHLR, PT_CLUD, PT_COPR, PT_DFOM, PT_LED, PT_PHOS,
+            PT_PPTI, PT_PPTO, PT_RADN, PT_SUN, PT_TIMC,
+        ] {
+            assert!(
+                host_may_emit_fire(dynamic_ty, 0),
+                "dynamic fire element {} must be recognized by may_emit_fire",
+                dynamic_ty
+            );
+        }
+        // Plain fluids/solids with no fire bits must return false so accum_fire skips them.
+        for non_fire_ty in [PT_WATR, PT_DSTW, PT_SLTW, PT_OIL, PT_DUST, PT_STNE, PT_DMND] {
+            let def = reg.get(non_fire_ty);
+            assert!(
+                !host_may_emit_fire(non_fire_ty, def.pixel_mode),
+                "non-fire element {} ({}) should not be marked as fire-emitting",
+                non_fire_ty,
+                def.name
+            );
+        }
     }
 }

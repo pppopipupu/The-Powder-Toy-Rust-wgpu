@@ -48,13 +48,12 @@
 //!
 //! `Simulation.cpp:3793` skips the whole block when neither element exists
 //! (`elementCount[PT_LOVE] <= 0 && elementCount[PT_LOLZ] <= 0`). The port keeps
-//! that gate on the device: [`love_gate_scan_kernel`] reduces `part_ty` over the
-//! used slots into one word of the otherwise unused `gpu_elem_phys` allocation
-//! ([`LOVE_GATE_WORD`]), and [`love_kernel`] terminates every block thread
-//! before touching `pmap` when the word is zero. The extra scan is one
-//! `part_ty` load per used slot — the same range every slot-parallel reaction
-//! pass already visits — and replaces the 81 `pmap` loads per block the absent
-//! case used to cost.
+//! that gate on the device: the active-element mask refreshed by
+//! `thermal_kernel::refresh_pmap_types_kernel` feeds the `SIM_SLOT_LOVE`
+//! indirect-dispatch slot, so [`love_kernel`] launches zero blocks when neither
+//! `LOVE` nor `LOLZ` is alive, and the host-side
+//! [`SimBuffers::has_seen_any`] check skips the pass entirely while neither has
+//! ever been introduced.
 //!
 //! # Deviations
 //!
@@ -87,12 +86,9 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_LOVE, sim_grid};
 use super::shared::{CR_NO_OCCUPANCY, CREATE_QUEUE_WORDS, launch_grid, request_create};
 use crate::buffers::SimBuffers;
-
-/// Word of the unused `gpu_elem_phys` allocation that carries the
-/// `elementCount` gate (`1` = the pool holds a `LOVE` or `LOLZ`).
-const LOVE_GATE_WORD: usize = 0;
 
 /// Low 9 bits of a packed `pmap` word hold the element type.
 const PMAP_TYPE_MASK: u32 = 0x1FF;
@@ -241,27 +237,6 @@ fn mark_block(
     marks
 }
 
-/// Clears the [`LOVE_GATE_WORD`] before [`love_gate_scan_kernel`].
-#[cube(launch_unchecked)]
-fn love_gate_clear_kernel(gate: &mut [Atomic<u32>]) {
-    if ABSOLUTE_POS == 0usize {
-        gate[LOVE_GATE_WORD].store(0u32);
-    }
-}
-
-/// Recomputes the `elementCount[PT_LOVE] > 0 || elementCount[PT_LOLZ] > 0`
-/// gate (`Simulation.cpp:3793`) from the live pool.
-#[cube(launch_unchecked)]
-fn love_gate_scan_kernel(part_ty: &[u32], gate: &mut [Atomic<u32>], bound: u32) {
-    let i = ABSOLUTE_POS as u32;
-    if i < bound {
-        let ty = part_ty[i as usize];
-        if ty == PT_LOVE_U32 || ty == PT_LOLZ_U32 {
-            gate[LOVE_GATE_WORD].fetch_or(1u32);
-        }
-    }
-}
-
 /// Re-stamps one 9x9 block (`Simulation.cpp:3821-3857`).
 ///
 /// Every cell is resolved from its own pre-pass map word and the two markers;
@@ -401,7 +376,6 @@ pub(super) fn love_kernel(
     part_ty: &mut [u32],
     create_queue: &mut [Atomic<u32>],
     wall_bmap: &[u32],
-    gate: &mut [Atomic<u32>],
     xres: u32,
     yres: u32,
     xcells: u32,
@@ -419,16 +393,6 @@ pub(super) fn love_kernel(
 ) {
     let block = ABSOLUTE_POS as u32;
     if block >= blocks {
-        terminate!();
-    }
-    // `Simulation.cpp:3793`: the reference skips the whole block scan when
-    // `elementCount[PT_LOVE] <= 0 && elementCount[PT_LOLZ] <= 0`. The gate word
-    // is the device's per-frame reduction of `part_ty`; a zero makes every
-    // block thread exit before it touches `pmap`. `fetch_max(0)` is the
-    // load that keeps the binding `read_write` for the atomic (commit.rs uses
-    // the same trick for `cell_winner`).
-    let gate_state = gate[LOVE_GATE_WORD].fetch_max(0u32);
-    if gate_state == 0u32 {
         terminate!();
     }
     let bx = block % bx_count;
@@ -488,43 +452,16 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     let last_bx = xres.saturating_sub(18) / BLOCK;
     let last_by = yres.saturating_sub(7) / BLOCK;
 
-    // `elementCount` gate (`Simulation.cpp:3793`): reduce the live pool into
-    // one device word, then let every block thread early-out on it.
-    let gate_len = crate::move_kernel::elem_phys_len();
-    unsafe {
-        love_gate_clear_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new_1d(1),
-            BufferArg::from_raw_parts(bufs.gpu_elem_phys.clone(), gate_len),
-        );
-    }
-    let bound = dims.used_slots as u32;
-    if bound > 0 {
-        let (gate_cubes, gate_dim) = launch_grid(bound as usize);
-        unsafe {
-            love_gate_scan_kernel::launch_unchecked(
-                &bufs.client,
-                CubeCount::Static(gate_cubes, 1, 1),
-                CubeDim::new_1d(gate_dim),
-                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-                BufferArg::from_raw_parts(bufs.gpu_elem_phys.clone(), gate_len),
-                bound,
-            );
-        }
-    }
-
-    let (cubes, dim) = launch_grid(blocks as usize);
+    let (_cubes, dim) = launch_grid(blocks as usize);
     unsafe {
         love_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_LOVE),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
             BufferArg::from_raw_parts(bufs.gpu_wall_bmap.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_elem_phys.clone(), gate_len),
             dims.xres,
             dims.yres,
             dims.xcells,

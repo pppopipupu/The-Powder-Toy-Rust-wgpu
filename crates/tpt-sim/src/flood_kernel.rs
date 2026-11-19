@@ -359,6 +359,7 @@ fn flood_create_kernel(
 /// `SimBuffers::GPU_CREATE_START..GPU_SPAWN_END`, so the host shadow does not
 /// learn about them until something explicitly reads it back.
 pub fn flood_fill_device(bufs: &mut SimBuffers, x: i32, y: i32, elem_ty: u32) {
+    bufs.note_elem_seen(elem_ty);
     let xres = bufs.config.xres;
     let yres = bufs.config.yres;
     if xres == 0 || yres == 0 || elem_ty == C_PT_NONE || elem_ty >= C_PT_NUM {
@@ -979,6 +980,17 @@ pub fn set_property_stroke(
     if points.is_empty() {
         return;
     }
+    match field {
+        PropertyField::Type => {
+            if let Some(word) = value.as_word(field) {
+                bufs.note_elem_seen(word);
+            }
+        }
+        PropertyField::Ctype => {
+            bufs.note_elem_seen(value.int_bits(field));
+        }
+        _ => {}
+    }
     // A pending host edit must reach the device before the write, or the next
     // upload would overwrite it.
     if bufs.host_dirty {
@@ -1132,6 +1144,9 @@ pub fn flood_property(
         }
         _ => value.int_bits(field),
     };
+    if matches!(field, PropertyField::Type | PropertyField::Ctype) {
+        bufs.note_elem_seen(target);
+    }
 
     let marks = bufs.client.empty(pixels * 4);
     let scratch = bufs.client.empty(slots * 4);

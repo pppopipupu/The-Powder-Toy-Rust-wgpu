@@ -384,7 +384,9 @@ pub fn set_particle_field(
         ParticleField::Ctype => (FIELD_CTYPE, 0),
     };
     let ctype_value = if field == ParticleField::Ctype {
-        value.clamp(0, PT_NUM as i64 - 1) as u32
+        let v = value.clamp(0, PT_NUM as i64 - 1) as u32;
+        bufs.note_elem_seen(v);
+        v
     } else {
         0
     };

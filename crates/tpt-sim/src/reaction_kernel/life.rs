@@ -2,7 +2,7 @@
 //! transformations.
 //!
 //! The `PROP_LIFE_DEC` countdown itself runs once per frame in
-//! [`crate::buffers::spatial::life_decay_kernel`]
+//! [`crate::buffers::spatial::recalc_free_particles_kernel`]
 //! (`Simulation::RecalcFreeParticles`, `Simulation.cpp:3399-3410`) before this
 //! pass, so the kernel below only reads the post-decrement `life` and must
 //! never decrement it a second time.
@@ -36,7 +36,7 @@ const _: () = assert!(WL_STASIS == 18);
 /// The life-dependent reactions a particle can resolve from its own state.
 ///
 /// The countdown and the `PROP_LIFE_KILL` / `PROP_LIFE_KILL_DEC` deaths ran
-/// once at the start of the frame in [`crate::buffers::spatial::life_decay_kernel`]
+/// once at the start of the frame in [`crate::buffers::spatial::recalc_free_particles_kernel`]
 /// (`Simulation.cpp:3399-3410`); this pass only reads the resulting value, so
 /// `life <= 1` here means "one tick left" exactly as in
 /// `Simulation::UpdateParticles` (`Simulation.cpp:2380-2400`).
@@ -97,10 +97,10 @@ pub(super) fn life_and_local_reaction_kernel(
                 life = 25i32 + ((hash_u32((i as u32) ^ frame_seed ^ 0x3C3C_u32) % 25u32) as i32);
             }
 
-            // The countdown ran once in `life_decay_kernel` at the start of the
-            // frame (`Simulation.cpp:3399-3410`). Decrementing here as well
-            // halved every timer and broke the `life == 3` / `life == 1`
-            // windows the element updates rely on.
+            // The countdown ran once in `recalc_free_particles_kernel` at the
+            // start of the frame (`Simulation.cpp:3399-3410`). Decrementing
+            // here as well halved every timer and broke the `life == 3` /
+            // `life == 1` windows the element updates rely on.
 
             if ty == PT_FIRE {
                 // Fire burns out. `tmp` records which gases fed it: `1` = hydrogen,
@@ -184,7 +184,7 @@ pub(super) fn life_and_local_reaction_kernel(
             // it; a particle that just transformed inherits its new element's
             // rules on the next frame instead. `PROP_LIFE_KILL_DEC` is not
             // repeated here: it kills only on the transition to zero, which is
-            // exactly the `life_decay_kernel` decrement.
+            // exactly the `recalc_free_particles_kernel` decrement.
             if new_ty == ty && (props & PROP_LIFE_KILL) != 0u32 && life <= 0i32 {
                 dead = true;
             }

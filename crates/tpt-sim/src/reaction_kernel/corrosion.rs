@@ -30,6 +30,7 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_CORROSION, sim_grid};
 use super::shared::{
     WORD_HARDNESS, elem_word, hash_u32, launch_grid, mix_index, pmap_at, pmap_slot, stasis_frozen,
 };
@@ -427,11 +428,12 @@ pub(super) fn acid_diffusion_kernel(
 
 /// Launch corrosion reaction and acid life diffusion passes.
 pub(super) fn launch_corrosion_pass(bufs: &SimBuffers, dims: &PassDims) {
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let grid = sim_grid(bufs, SIM_SLOT_CORROSION);
     unsafe {
         corrosion_reaction_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -448,7 +450,7 @@ pub(super) fn launch_corrosion_pass(bufs: &SimBuffers, dims: &PassDims) {
         );
         acid_diffusion_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),

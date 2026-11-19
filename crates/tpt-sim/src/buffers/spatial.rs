@@ -17,8 +17,6 @@ use tpt_core::constants::*;
 use tpt_core::particle::GpuParticle;
 use tpt_core::walls::{is_wall_blocking_air, is_wall_blocking_heat};
 
-use crate::move_kernel::{clear_spatial_maps_kernel, scatter_spatial_maps_kernel};
-
 use super::SimBuffers;
 
 /// Work units per cube (the portable WebGPU minimum for a 1-D cube).
@@ -26,6 +24,12 @@ const CUBE_DIM: u32 = 256;
 
 /// `PT_NONE` as a `u32` for kernel-side guards.
 const PT_NONE_U32: u32 = PT_NONE;
+const PT_NUM_U32: u32 = PT_NUM as u32;
+const PT_INVIS_U32: u32 = PT_INVIS;
+const PT_FILT_U32: u32 = PT_FILT;
+const _: () = assert!(PT_INVIS_U32 == 124);
+const _: () = assert!(PT_FILT_U32 == 134);
+const _: () = assert!(PT_NUM_U32 as usize == PT_NUM);
 /// `PT_NBHL` (stack collapse result).
 const PT_NBHL_U32: u32 = PT_NBHL;
 const _: () = assert!(PT_NBHL_U32 == 40);
@@ -71,17 +75,30 @@ fn mix_index(index: u32, salt: u32) -> u32 {
     index * salt
 }
 
-/// Decreases particle `life` and kills expired particles, mirroring the
-/// `do_life_dec` block of `RecalcFreeParticles` (`Simulation.cpp:3396-3410`).
-///
-/// A particle with `PROP_LIFE_DEC` and positive life loses one tick unless it
-/// sits in a `WL_STASIS` cell with `emap < 8`; a life that reaches zero kills
-/// the particle when it also carries `PROP_LIFE_KILL` or `PROP_LIFE_KILL_DEC`.
-/// A particle whose life is already zero dies when it carries
-/// `PROP_LIFE_KILL`.
+/// Clears `pmap`, `photons` and `pmap_count` in one pixel-parallel dispatch
+/// (`Simulation.cpp:3362-3364`).
+#[cube(launch_unchecked)]
+pub fn clear_spatial_and_counts_kernel(
+    pmap: &mut [u32],
+    photons: &mut [u32],
+    pmap_count: &mut [Atomic<u32>],
+    num_pixels: u32,
+) {
+    let idx = ABSOLUTE_POS;
+    if idx < num_pixels as usize {
+        pmap[idx] = 0u32;
+        photons[idx] = 0u32;
+        pmap_count[idx].store(0u32);
+    }
+}
+
+/// Fused `RecalcFreeParticles` pass (`Simulation.cpp:3347-3415`):
+/// life decay (`do_life_dec`), `pmap` / `photons` scatter (with the `INVIS`/`FILT`
+/// preservation rule), and `pmap_count` stack count in a single slot-parallel
+/// traversal so `part_ty`/`part_x`/`part_y`/`elem_props` are loaded once per slot.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
-pub fn life_decay_kernel(
+pub fn recalc_free_particles_kernel(
     part_ty: &mut [u32],
     part_life: &mut [i32],
     part_x: &[f32],
@@ -89,6 +106,9 @@ pub fn life_decay_kernel(
     elem_props: &[u32],
     wall_bmap: &[u32],
     wall_emap: &[u32],
+    pmap: &mut [u32],
+    photons: &mut [u32],
+    pmap_count: &mut [Atomic<u32>],
     slot_count: u32,
     elem_rows: u32,
     xres: u32,
@@ -97,90 +117,56 @@ pub fn life_decay_kernel(
     _ycells: u32,
 ) {
     let i = ABSOLUTE_POS;
-    if i < slot_count as usize {
-        let ty = part_ty[i];
-        if ty != PT_NONE_U32 && ty < elem_rows {
-            let x = i32::cast_from(part_x[i] + 0.5f32);
-            let y = i32::cast_from(part_y[i] + 0.5f32);
-            let mut in_bounds = 0u32;
-            let mut stasis = 0u32;
-            if x >= 0i32 && y >= 0i32 && x < xres as i32 && y < yres as i32 {
-                in_bounds = 1u32;
-                let cell = ((y as u32) / CELL) * xcells + ((x as u32) / CELL);
-                if (wall_bmap[cell as usize] & 0xFFu32) == WL_STASIS_U32
-                    && (wall_emap[cell as usize] & 0xFFu32) < 8u32
-                {
-                    stasis = 1u32;
-                }
-            }
+    if i >= slot_count as usize {
+        terminate!();
+    }
+    let mut ty = part_ty[i];
+    if ty == PT_NONE_U32 || ty >= elem_rows {
+        terminate!();
+    }
 
-            let props = elem_props[(ty as usize) * 32usize + 1usize];
-            let life = part_life[i];
-            if life > 0i32
-                && (props & PROP_LIFE_DEC_U32) != 0u32
-                && (in_bounds == 0u32 || stasis == 0u32)
-            {
-                let next = life - 1i32;
-                part_life[i] = next;
-                if next <= 0i32 && (props & (PROP_LIFE_KILL_DEC_U32 | PROP_LIFE_KILL_U32)) != 0u32 {
-                    part_ty[i] = PT_NONE_U32;
-                }
-            } else if life <= 0i32
-                && (props & PROP_LIFE_KILL_U32) != 0u32
-                && (in_bounds == 0u32 || stasis == 0u32)
-            {
-                part_ty[i] = PT_NONE_U32;
-            }
+    let x = i32::cast_from(part_x[i] + 0.5f32);
+    let y = i32::cast_from(part_y[i] + 0.5f32);
+    let in_bounds = x >= 0i32 && y >= 0i32 && x < xres as i32 && y < yres as i32;
+    let mut stasis = 0u32;
+    if in_bounds {
+        let cell = ((y as u32) / CELL) * xcells + ((x as u32) / CELL);
+        if (wall_bmap[cell as usize] & 0xFFu32) == WL_STASIS_U32
+            && (wall_emap[cell as usize] & 0xFFu32) < 8u32
+        {
+            stasis = 1u32;
         }
     }
-}
 
-/// Clears `pmap_count` before [`pmap_count_kernel`] refills it
-/// (`Simulation.cpp:3363`).
-#[cube(launch_unchecked)]
-pub fn pmap_count_clear_kernel(pmap_count: &mut [Atomic<u32>], num_pixels: u32) {
-    let idx = ABSOLUTE_POS;
-    if idx < num_pixels as usize {
-        pmap_count[idx].store(0u32);
+    let props = elem_props[(ty as usize) * 32usize + 1usize];
+    let life = part_life[i];
+    if life > 0i32 && (props & PROP_LIFE_DEC_U32) != 0u32 && (!in_bounds || stasis == 0u32) {
+        let next = life - 1i32;
+        part_life[i] = next;
+        if next <= 0i32 && (props & (PROP_LIFE_KILL_DEC_U32 | PROP_LIFE_KILL_U32)) != 0u32 {
+            part_ty[i] = PT_NONE_U32;
+            ty = PT_NONE_U32;
+        }
+    } else if life <= 0i32 && (props & PROP_LIFE_KILL_U32) != 0u32 && (!in_bounds || stasis == 0u32)
+    {
+        part_ty[i] = PT_NONE_U32;
+        ty = PT_NONE_U32;
     }
-}
 
-/// Rebuilds `pmap_count` from the live particle list
-/// (`Simulation.cpp:3381-3384`).
-///
-/// Every non-energy particle increments its pixel; `THDR`, `EMBR`, `FIGH` and
-/// `PLSM` are excluded because they are allowed to stack without triggering the
-/// black-hole collapse.
-#[cube(launch_unchecked)]
-pub fn pmap_count_kernel(
-    part_ty: &[u32],
-    part_x: &[f32],
-    part_y: &[f32],
-    elem_props: &[u32],
-    pmap_count: &mut [Atomic<u32>],
-    slot_count: u32,
-    elem_rows: u32,
-    xres: u32,
-    yres: u32,
-) {
-    let i = ABSOLUTE_POS;
-    if i < slot_count as usize {
-        let ty = part_ty[i];
-        if ty != PT_NONE_U32 && ty < elem_rows {
-            let x = i32::cast_from(part_x[i] + 0.5f32);
-            let y = i32::cast_from(part_y[i] + 0.5f32);
-            if x >= 0i32 && y >= 0i32 && x < xres as i32 && y < yres as i32 {
-                let props = elem_props[(ty as usize) * 32usize + 1usize];
-                if (props & TYPE_ENERGY_U32) == 0u32
-                    && ty != PT_THDR_U32
-                    && ty != PT_EMBR_U32
-                    && ty != PT_FIGH_U32
-                    && ty != PT_PLSM_U32
-                {
-                    let idx = ((y as u32) * xres + (x as u32)) as usize;
-                    pmap_count[idx].fetch_add(1u32);
-                }
-            }
+    if ty == PT_NONE_U32 || !in_bounds || ty >= PT_NUM_U32 {
+        terminate!();
+    }
+
+    let idx = ((y as u32) * xres + (x as u32)) as usize;
+    let packed = (((i as u32) + 1u32) << 9u32) | (ty & 0x1FFu32);
+    if (props & TYPE_ENERGY_U32) != 0u32 {
+        photons[idx] = packed;
+    } else {
+        if pmap[idx] == 0u32 || (ty != PT_INVIS_U32 && ty != PT_FILT_U32) {
+            pmap[idx] = packed;
+        }
+        if ty != PT_THDR_U32 && ty != PT_EMBR_U32 && ty != PT_FIGH_U32 && ty != PT_PLSM_U32 {
+            pmap_count[idx].fetch_add(1u32);
         }
     }
 }
@@ -371,12 +357,13 @@ impl SimBuffers {
     ///
     /// Runs once per frame before the thermal and reaction passes:
     ///
-    /// 1. [`life_decay_kernel`] decrements/kills `PROP_LIFE_DEC` particles,
-    /// 2. [`clear_spatial_maps_kernel`] + [`scatter_spatial_maps_kernel`]
-    ///    rebuild `pmap` / `photons` (with the INVIS/FILT preservation rule),
-    /// 3. [`pmap_count_clear_kernel`] + [`pmap_count_kernel`] rebuild the stack
-    ///    counts,
-    /// 4. when `stacking_check` is set (the reference's 1-in-10 cadence),
+    /// 1. [`clear_spatial_and_counts_kernel`] zeroes `pmap`, `photons` and
+    ///    `pmap_count`,
+    /// 2. [`recalc_free_particles_kernel`] fuses the `do_life_dec` decrement and
+    ///    deaths with the `pmap` / `photons` scatter (INVIS/FILT preservation
+    ///    rule) and the `pmap_count` stack count, so every slot's particle is
+    ///    loaded once instead of three times,
+    /// 3. when `stacking_check` is set (the reference's 1-in-10 cadence),
     ///    [`stacking_mark_kernel`] + [`stacking_apply_kernel`] collapse extreme
     ///    stacks into `NBHL`.
     ///
@@ -403,8 +390,16 @@ impl SimBuffers {
         let pixel_cubes = (pixels as u32).div_ceil(CUBE_DIM).max(1);
 
         unsafe {
-            // 1. `do_life_dec`.
-            life_decay_kernel::launch_unchecked(
+            clear_spatial_and_counts_kernel::launch_unchecked(
+                &client,
+                CubeCount::Static(pixel_cubes, 1, 1),
+                CubeDim::new_1d(CUBE_DIM),
+                BufferArg::from_raw_parts(self.gpu_pmap.clone(), pixels),
+                BufferArg::from_raw_parts(self.gpu_photons.clone(), pixels),
+                BufferArg::from_raw_parts(self.gpu_pmap_count.clone(), pixels),
+                pixels as u32,
+            );
+            recalc_free_particles_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(slot_cubes, 1, 1),
                 CubeDim::new_1d(CUBE_DIM),
@@ -421,59 +416,15 @@ impl SimBuffers {
                     self.gpu_wall_emap.clone(),
                     xcells as usize * ycells as usize,
                 ),
+                BufferArg::from_raw_parts(self.gpu_pmap.clone(), pixels),
+                BufferArg::from_raw_parts(self.gpu_photons.clone(), pixels),
+                BufferArg::from_raw_parts(self.gpu_pmap_count.clone(), pixels),
                 slots as u32,
                 elem_rows as u32,
                 xres,
                 yres,
                 xcells,
                 ycells,
-            );
-
-            // 2. `memset(pmap/photons)` + the particle scatter.
-            clear_spatial_maps_kernel::launch_unchecked(
-                &client,
-                CubeCount::Static(pixel_cubes, 1, 1),
-                CubeDim::new_1d(CUBE_DIM),
-                BufferArg::from_raw_parts(self.gpu_pmap.clone(), pixels),
-                BufferArg::from_raw_parts(self.gpu_photons.clone(), pixels),
-                pixels as u32,
-            );
-            scatter_spatial_maps_kernel::launch_unchecked(
-                &client,
-                CubeCount::Static(slot_cubes, 1, 1),
-                CubeDim::new_1d(CUBE_DIM),
-                BufferArg::from_raw_parts(self.gpu_part_ty.clone(), capacity),
-                BufferArg::from_raw_parts(self.gpu_part_x.clone(), capacity),
-                BufferArg::from_raw_parts(self.gpu_part_y.clone(), capacity),
-                BufferArg::from_raw_parts(self.gpu_elem_props.clone(), elem_len),
-                BufferArg::from_raw_parts(self.gpu_pmap.clone(), pixels),
-                BufferArg::from_raw_parts(self.gpu_photons.clone(), pixels),
-                slots as u32,
-                xres,
-                yres,
-            );
-
-            // 3. `pmap_count`.
-            pmap_count_clear_kernel::launch_unchecked(
-                &client,
-                CubeCount::Static(pixel_cubes, 1, 1),
-                CubeDim::new_1d(CUBE_DIM),
-                BufferArg::from_raw_parts(self.gpu_pmap_count.clone(), pixels),
-                pixels as u32,
-            );
-            pmap_count_kernel::launch_unchecked(
-                &client,
-                CubeCount::Static(slot_cubes, 1, 1),
-                CubeDim::new_1d(CUBE_DIM),
-                BufferArg::from_raw_parts(self.gpu_part_ty.clone(), capacity),
-                BufferArg::from_raw_parts(self.gpu_part_x.clone(), capacity),
-                BufferArg::from_raw_parts(self.gpu_part_y.clone(), capacity),
-                BufferArg::from_raw_parts(self.gpu_elem_props.clone(), elem_len),
-                BufferArg::from_raw_parts(self.gpu_pmap_count.clone(), pixels),
-                slots as u32,
-                elem_rows as u32,
-                xres,
-                yres,
             );
 
             // 4. `CheckStacking` (1-in-10 frames in the reference).

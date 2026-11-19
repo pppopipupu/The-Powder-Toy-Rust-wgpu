@@ -207,6 +207,12 @@ fn smooth_auto_bounds(auto_min: f32, auto_max: f32, prev_min: f32, prev_max: f32
     (auto_min, auto_max)
 }
 
+#[allow(clippy::erasing_op)]
+#[cube]
+fn seed_u32(anchor: u32, value: u32) -> u32 {
+    anchor * 0u32 + value
+}
+
 /// Zero the reduction slot.
 #[cube(launch_unchecked)]
 fn reset_heat_range_kernel(range: &mut [Atomic<u32>]) {
@@ -217,7 +223,7 @@ fn reset_heat_range_kernel(range: &mut [Atomic<u32>]) {
     }
 }
 
-/// `Renderer.cpp:1457-1475`: scan the particle field.
+/// `Renderer.cpp:1457-1475`: scan the particle field with per-workgroup reduction.
 #[cube(launch_unchecked)]
 fn heat_range_particles_kernel(
     part_ty: &[u32],
@@ -234,6 +240,8 @@ fn heat_range_particles_kernel(
     area_h: i32,
 ) {
     let idx = ABSOLUTE_POS as u32;
+    let mut kmin = seed_u32(bound, u32::MAX);
+    let mut kmax = seed_u32(bound, 0u32);
     if idx < bound {
         let ty = part_ty[idx as usize];
         if ty != C_PT_NONE && ty < C_PT_NUM && ty < elem_rows {
@@ -245,16 +253,41 @@ fn heat_range_particles_kernel(
                 let py = (part_y[idx as usize] + 0.5f32) as i32;
                 if px >= area_x && px < area_x + area_w && py >= area_y && py < area_y + area_h {
                     let key = u32::reinterpret(part_temp[idx as usize]);
-                    range[0].fetch_min(key);
-                    range[1].fetch_max(key);
-                    range[2].store(1u32);
+                    kmin = key;
+                    kmax = key;
                 }
             }
         }
     }
+    let mut sm_min = Shared::<[u32]>::new_slice(256usize);
+    let mut sm_max = Shared::<[u32]>::new_slice(256usize);
+    let tid = UNIT_POS_X as usize;
+    sm_min[tid] = kmin;
+    sm_max[tid] = kmax;
+    sync_cube();
+    let mut s = 128usize;
+    while s > 0usize {
+        if tid < s {
+            let omin = sm_min[tid + s];
+            if omin < sm_min[tid] {
+                sm_min[tid] = omin;
+            }
+            let omax = sm_max[tid + s];
+            if omax > sm_max[tid] {
+                sm_max[tid] = omax;
+            }
+        }
+        sync_cube();
+        s /= 2usize;
+    }
+    if tid == 0usize && sm_min[0usize] != u32::MAX {
+        range[0].fetch_min(sm_min[0usize]);
+        range[1].fetch_max(sm_max[0usize]);
+        range[2].store(1u32);
+    }
 }
 
-/// `Renderer.cpp:1478-1485`: scan the ambient-heat grid.
+/// `Renderer.cpp:1478-1485`: scan the ambient-heat grid with per-workgroup reduction.
 #[cube(launch_unchecked)]
 fn heat_range_air_kernel(
     air_hv: &[f32],
@@ -267,6 +300,8 @@ fn heat_range_air_kernel(
     area_h: i32,
 ) {
     let idx = ABSOLUTE_POS as u32;
+    let mut kmin = seed_u32(cells, u32::MAX);
+    let mut kmax = seed_u32(cells, 0u32);
     if idx < cells {
         // `for (auto p : CELLS.OriginRect()) visit(p * CELL, hv[p.Y][p.X]);`
         let cx = idx % xcells;
@@ -275,10 +310,35 @@ fn heat_range_air_kernel(
         let py = (cy * C_CELL) as i32;
         if px >= area_x && px < area_x + area_w && py >= area_y && py < area_y + area_h {
             let key = u32::reinterpret(air_hv[idx as usize]);
-            range[0].fetch_min(key);
-            range[1].fetch_max(key);
-            range[2].store(1u32);
+            kmin = key;
+            kmax = key;
         }
+    }
+    let mut sm_min = Shared::<[u32]>::new_slice(256usize);
+    let mut sm_max = Shared::<[u32]>::new_slice(256usize);
+    let tid = UNIT_POS_X as usize;
+    sm_min[tid] = kmin;
+    sm_max[tid] = kmax;
+    sync_cube();
+    let mut s = 128usize;
+    while s > 0usize {
+        if tid < s {
+            let omin = sm_min[tid + s];
+            if omin < sm_min[tid] {
+                sm_min[tid] = omin;
+            }
+            let omax = sm_max[tid + s];
+            if omax > sm_max[tid] {
+                sm_max[tid] = omax;
+            }
+        }
+        sync_cube();
+        s /= 2usize;
+    }
+    if tid == 0usize && sm_min[0usize] != u32::MAX {
+        range[0].fetch_min(sm_min[0usize]);
+        range[1].fetch_max(sm_max[0usize]);
+        range[2].store(1u32);
     }
 }
 

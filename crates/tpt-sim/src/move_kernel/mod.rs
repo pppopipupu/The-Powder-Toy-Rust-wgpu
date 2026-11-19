@@ -233,8 +233,7 @@ const _: () = assert!(META_WORDS == 12);
 /// Words per element in the physics record:
 /// `[advection, air_drag, air_loss, loss, collision, gravity, diffusion, hot_air]`.
 ///
-/// The words live in the tail of `move_lut`; this length also sizes the
-/// legacy `gpu_elem_phys` allocation, whose word 0 carries the `LOVE` gate.
+/// The words live in the tail of `move_lut`.
 const PHYS_WORDS: usize = 8;
 
 /// Index of the first physics word inside one `move_lut` element record.
@@ -246,15 +245,6 @@ const META_PROPERTIES: usize = 0;
 const META_FALLDOWN: usize = 1;
 const META_RANK: usize = 2;
 const META_HEAT_CONDUCT: usize = 3;
-
-/// Words of the legacy standalone per-element physics table.
-///
-/// The velocity kernel no longer binds it (the physics words moved into
-/// `move_lut`); the size is still exported because `buffers::layout` allocates
-/// `gpu_elem_phys` with it.
-pub(crate) const fn elem_phys_len() -> usize {
-    PT_NUM * PHYS_WORDS
-}
 
 /// Words of the photon-mask table the commit kernel binds.
 pub(crate) const fn photon_mask_len() -> usize {

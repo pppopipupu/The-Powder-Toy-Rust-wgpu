@@ -111,7 +111,30 @@ impl SimBuffers {
             || slots.contains(&FULL_PARTICLE_UPLOAD);
 
         if full {
+            // Scan the host shadow once during a wholesale upload (save load,
+            // undo restore, reset) so `host_seen_elem_mask` covers every
+            // particle type and `ctype` entering the device.
+            for (&ty, &ct) in self.part_ty.iter().zip(self.part_ctype.iter()) {
+                if ty != PT_NONE {
+                    if (ty as usize) < 256 {
+                        self.host_seen_elem_mask[(ty >> 6) as usize] |= 1u64 << (ty & 63);
+                    }
+                    if ct != 0 && (ct as usize) < 256 {
+                        self.host_seen_elem_mask[(ct >> 6) as usize] |= 1u64 << (ct & 63);
+                    }
+                }
+            }
             self.upload_all_particles();
+        } else {
+            for &slot in &slots {
+                let id = slot as usize;
+                if id < self.capacity {
+                    let ty = self.part_ty[id];
+                    let ct = self.part_ctype[id];
+                    self.note_elem_seen(ty);
+                    self.note_elem_seen(ct);
+                }
+            }
         }
         slots.sort_unstable();
         slots.dedup();

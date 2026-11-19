@@ -1133,6 +1133,7 @@ impl SimBuffers {
         self.next_slot = 0;
         self.free_list.clear();
         self.pending_live_count = None;
+        self.host_seen_elem_mask = [0u64; 4];
         self.reset_device_soa();
         // Every array was rewritten, so the next upload is a whole-pool one.
         self.host_dirty_slots.clear();

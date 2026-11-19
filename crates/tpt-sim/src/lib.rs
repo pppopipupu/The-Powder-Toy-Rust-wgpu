@@ -57,8 +57,7 @@ pub use buffers::{MIN_PARTICLE_CAPACITY, SimBuffers};
 
 use cubecl::client::Client;
 
-use tpt_core::constants::TYPE_ENERGY;
-use tpt_core::elements::{ElementRegistry, GpuElementProps};
+use tpt_core::elements::ElementRegistry;
 use tpt_core::particle::SimulationConfig;
 use tpt_core::sign::{MAX_SIGNS, Sign};
 use tpt_core::walls::{WallDef, default_walls};
@@ -232,49 +231,12 @@ impl SimulationEngine {
     /// Push element property edits (Lua `elem.property` / `elem.allocate`) to the
     /// GPU element tables, but only when the registry actually changed.
     fn sync_element_tables(&mut self) {
-        // This runs every tick, so the unchanged case must not allocate: the
-        // displacement matrix alone is PT_NUM^2 words (~150 KB) and used to be
-        // rebuilt and compared on every frame. Compare in place and only build
-        // the owned tables when something really differs.
-        let host_props = &self.bufs.elem_props_host;
-        let host_can_move = &self.bufs.can_move_host;
-        let registry_can_move = &self.registry.can_move;
-        let props_same = self.registry.elements.len() == host_props.len()
-            && self
-                .registry
-                .elements
-                .iter()
-                .zip(host_props.iter())
-                .all(|(def, host)| {
-                    bytemuck::bytes_of(&GpuElementProps::from_def(def)) == bytemuck::bytes_of(host)
-                });
-        // `to_gpu_can_move_u32` zero-fills past the registry matrix, so a host
-        // copy of a different length can never match.
-        let can_move_same = host_can_move.len()
-            == tpt_core::constants::PT_NUM * tpt_core::constants::PT_NUM
-            && host_can_move
-                .iter()
-                .zip(registry_can_move.iter())
-                .all(|(&host, &reg)| host == u32::from(reg))
-            && host_can_move
-                .iter()
-                .skip(registry_can_move.len())
-                .all(|&host| host == 0);
-        if props_same && can_move_same {
+        if self.bufs.elem_table_generation == self.registry.generation
+            && self.bufs.elem_props_host.len() == self.registry.elements.len()
+        {
             return;
         }
-        let props = self.registry.to_gpu_props();
-        let can_move = self.registry.to_gpu_can_move_u32();
-        self.bufs.elem_props_host = props;
-        self.bufs.can_move_host = can_move;
-        self.bufs.elem_is_energy = self
-            .registry
-            .elements
-            .iter()
-            .map(|def| def.properties & TYPE_ENERGY != 0)
-            .collect();
-        self.bufs.upload_element_tables();
-        self.bufs.move_tables_stale = true;
+        self.bufs.refresh_element_tables(&self.registry);
     }
 
     /// Advance the simulation by one frame.
@@ -426,15 +388,19 @@ impl SimulationEngine {
         // Game of Life. TPT runs `SimulateGoL` at the end of `BeforeSim`,
         // i.e. after the reactions and before the particle update, so a
         // generation's births join this frame's movement/map rebuild. The
-        // generation gate lives in the device `counters[0]` word, so the host
-        // never reads it back; `GSPEED` / `CGOL` decide how many frames pass
-        // between generations (`Simulation.cpp:3885-3888`).
+        // per-generation pass is gated by the device element-mask dispatch
+        // slot, so the host never reads a counter back; `GSPEED` / `CGOL`
+        // decide how many frames pass between generations
+        // (`Simulation.cpp:3885-3888`).
         // GoL births go through the same device creation queue as the reaction
         // passes: arm a fresh queue and free-slot window, run the generation,
-        // then materialise its births in this tick.
-        reaction_kernel::begin_pending_creates(&self.bufs);
-        gol_kernel::step_gol_gpu(&mut self.bufs, &mut self.gol, &self.registry, self.gspeed);
-        reaction_kernel::drain_pending_creates(&self.bufs, seed);
+        // then materialise its births in this tick. Skip the whole group when
+        // no `LIFE` has ever been introduced since the last clear/resize.
+        if self.bufs.has_seen_elem(tpt_core::constants::PT_LIFE) {
+            reaction_kernel::begin_pending_creates(&self.bufs);
+            gol_kernel::step_gol_gpu(&mut self.bufs, &mut self.gol, &self.registry, self.gspeed);
+            reaction_kernel::drain_pending_creates(&self.bufs, seed);
+        }
 
         // Movement (lock-free intent/winner/commit). The `e == 2` pair
         // resolution (`Simulation::try_move`, `Simulation.cpp:1258-1381`) is

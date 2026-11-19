@@ -19,10 +19,12 @@
 
 use super::framebuffer::{
     add_fire_px, clampf, clampi, fb_blue, fb_green, fb_red, heat_temp_colour, pack_argb, pack_rgb,
+    seed_u32,
 };
 use super::particles::{
     acty_fire, base_rgb, bflm_fire, bizr_graphics, chlr_fire, clud_fire, collapse_deco, copr_fire,
     deco_visible, dfom_fire, embr_graphics, exot_flicker, exot_graphics, grav_graphics, led_fire,
+    may_emit_fire,
     particle_rgb, phos_fire, pipe_cargo, pipe_pixel_mode, ppti_fire, ppto_fire, radn_fire,
     rock_graphics, sun_fire, timc_fire, tron_graphics, tung_fire, vibr_graphics, wavelength_rgb,
 };
@@ -535,6 +537,10 @@ fn accum_fire(
             if slot < part_life.len() {
                 let ty = packed & PMAP_TYPE_MASK;
                 let base = (ty % elem_count) * ELEM_WORDS;
+                let static_mode = elem_props[(base + ELEM_PIXEL_MODE) as usize];
+                if !may_emit_fire(ty, static_mode) {
+                    terminate!();
+                }
                 let life = part_life[slot];
                 let temp = part_temp[slot];
                 let ctype = part_ctype[slot];
@@ -545,13 +551,7 @@ fn accum_fire(
                 // `PIPE.cpp:349-352`: a loaded pipe feeds the fire buffer with
                 // the cargo's `FIRE_*` bits, not the pipe's.
                 let mode = effective_pixel_mode(
-                    pipe_pixel_mode(
-                        elem_props[(base + ELEM_PIXEL_MODE) as usize],
-                        ty,
-                        ctype,
-                        elem_props,
-                        elem_count,
-                    ),
+                    pipe_pixel_mode(static_mode, ty, ctype, elem_props, elem_count),
                     ty,
                     life,
                     ctype,
@@ -893,48 +893,104 @@ pub fn render_fire_add_kernel(framebuf: &mut [u32], layer: &[u32], xres: u32, yr
     }
 }
 
+#[allow(clippy::implicit_saturating_sub)]
+#[cube]
+fn decay_fire_cell(
+    fire_r: &mut [u32],
+    fire_g: &mut [u32],
+    fire_b: &mut [u32],
+    idx: u32,
+    xcells: u32,
+    ycells: u32,
+) -> u32 {
+    let cx = idx % xcells;
+    let cy = idx / xcells;
+    let mut sr = fire_r[idx as usize] * 8u32;
+    let mut sg = fire_g[idx as usize] * 8u32;
+    let mut sb = fire_b[idx as usize] * 8u32;
+    for j in 0u32..3u32 {
+        for i in 0u32..3u32 {
+            if i != 1u32 || j != 1u32 {
+                let nx = cx as i32 + i as i32 - 1i32;
+                let ny = cy as i32 + j as i32 - 1i32;
+                if nx >= 0i32 && ny >= 0i32 && (nx as u32) < xcells && (ny as u32) < ycells {
+                    let c = ((ny as u32) * xcells + (nx as u32)) as usize;
+                    sr += fire_r[c];
+                    sg += fire_g[c];
+                    sb += fire_b[c];
+                }
+            }
+        }
+    }
+    let r = sr / 16u32;
+    let g = sg / 16u32;
+    let b = sb / 16u32;
+    let nr = if r > 4u32 { r - 4u32 } else { 0u32 };
+    let ng = if g > 4u32 { g - 4u32 } else { 0u32 };
+    let nb = if b > 4u32 { b - 4u32 } else { 0u32 };
+    fire_r[idx as usize] = nr;
+    fire_g[idx as usize] = ng;
+    fire_b[idx as usize] = nb;
+    if nr != 0u32 || ng != 0u32 || nb != 0u32 {
+        1u32
+    } else {
+        0u32
+    }
+}
+
 /// Diffuses and decays `fire_r/g/b` for the next frame (TPT `render_fire` tail).
 ///
 /// `r = (8 * r_self + sum of the 8 neighbours) / 16`, then `-4` when above 4.
 /// TPT runs this in place in scan order; here every cell is independent, so a
 /// neighbour read may see the old or the new value. The decay is a slow blur, so
 /// the difference is a sub-percent per-frame offset.
-// `saturating_sub` has no CubeCL expansion, so the clamped decrement is written out with `if`.
-#[allow(clippy::implicit_saturating_sub)]
 #[cube(launch_unchecked)]
 pub fn render_fire_decay_kernel(
     fire_r: &mut [u32],
     fire_g: &mut [u32],
     fire_b: &mut [u32],
+    fx_cell: &mut [Atomic<u32>],
     xcells: u32,
     ycells: u32,
 ) {
     let idx = ABSOLUTE_POS as u32;
+    let mut nonzero = seed_u32(xcells, 0u32);
     if idx < xcells * ycells {
-        let cx = idx % xcells;
-        let cy = idx / xcells;
-        let mut sr = fire_r[idx as usize] * 8u32;
-        let mut sg = fire_g[idx as usize] * 8u32;
-        let mut sb = fire_b[idx as usize] * 8u32;
-        for j in 0u32..3u32 {
-            for i in 0u32..3u32 {
-                if i != 1u32 || j != 1u32 {
-                    let nx = cx as i32 + i as i32 - 1i32;
-                    let ny = cy as i32 + j as i32 - 1i32;
-                    if nx >= 0i32 && ny >= 0i32 && (nx as u32) < xcells && (ny as u32) < ycells {
-                        let c = ((ny as u32) * xcells + (nx as u32)) as usize;
-                        sr += fire_r[c];
-                        sg += fire_g[c];
-                        sb += fire_b[c];
-                    }
-                }
-            }
-        }
-        let r = sr / 16u32;
-        let g = sg / 16u32;
-        let b = sb / 16u32;
-        fire_r[idx as usize] = if r > 4u32 { r - 4u32 } else { 0u32 };
-        fire_g[idx as usize] = if g > 4u32 { g - 4u32 } else { 0u32 };
-        fire_b[idx as usize] = if b > 4u32 { b - 4u32 } else { 0u32 };
+        nonzero = decay_fire_cell(fire_r, fire_g, fire_b, idx, xcells, ycells);
+    }
+    let mut sm = Shared::<[u32]>::new_slice(256usize);
+    let tid = UNIT_POS_X as usize;
+    sm[tid] = nonzero;
+    sync_cube();
+    if tid < 128usize {
+        sm[tid] |= sm[tid + 128usize];
+    }
+    sync_cube();
+    if tid < 64usize {
+        sm[tid] |= sm[tid + 64usize];
+    }
+    sync_cube();
+    if tid < 32usize {
+        sm[tid] |= sm[tid + 32usize];
+    }
+    sync_cube();
+    if tid < 16usize {
+        sm[tid] |= sm[tid + 16usize];
+    }
+    sync_cube();
+    if tid < 8usize {
+        sm[tid] |= sm[tid + 8usize];
+    }
+    sync_cube();
+    if tid < 4usize {
+        sm[tid] |= sm[tid + 4usize];
+    }
+    sync_cube();
+    if tid < 2usize {
+        sm[tid] |= sm[tid + 2usize];
+    }
+    sync_cube();
+    if tid == 0usize && (sm[0usize] | sm[1usize]) != 0u32 {
+        fx_cell[(xcells * ycells + 1u32) as usize].store(1u32);
     }
 }

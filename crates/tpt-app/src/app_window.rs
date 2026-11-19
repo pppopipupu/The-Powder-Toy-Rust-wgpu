@@ -7,7 +7,7 @@
 //! window, event and frame-sequence bookkeeping.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tpt_core::constants::{DEFAULT_XRES, DEFAULT_YRES, PT_SAND, PT_WATR};
 use winit::application::ApplicationHandler;
@@ -18,9 +18,11 @@ use winit::window::{Window, WindowId};
 
 use crate::app_state::{AppScreen, AppState};
 use crate::gpu_ctx::GpuContext;
-use crate::seed_smoke_scene;
 use crate::ui_panels;
-use crate::{HEADLESS_CANVAS, WINDOW_TITLE};
+use crate::{
+    BenchScene, BenchStats, HEADLESS_CANVAS, WINDOW_TITLE, WindowedBenchConfig, seed_bench_plasma,
+    seed_smoke_scene,
+};
 
 mod frame;
 mod geometry;
@@ -39,6 +41,74 @@ const INITIAL_WINDOW_HEIGHT: f64 = 800.0;
 const MIN_WINDOW_WIDTH: f64 = 800.0;
 /// Smallest logical window height that still fits the HUD.
 const MIN_WINDOW_HEIGHT: f64 = 560.0;
+
+/// Live state for `--windowed-bench`.
+struct WindowedBenchState {
+    cfg: WindowedBenchConfig,
+    scene_idx: usize,
+    warmup_left: u32,
+    measure_start: Instant,
+    frame_samples: Vec<Duration>,
+    tick_cpu_ns: u128,
+    ui_cpu_ns: u128,
+    render_cpu_ns: u128,
+    tess_cpu_ns: u128,
+    present_cpu_ns: u128,
+    sim_ticks: u64,
+    last_plasma_reseed_tick: u64,
+    done: bool,
+}
+
+impl WindowedBenchState {
+    const WARMUP_FRAMES: u32 = 30;
+
+    fn new(cfg: WindowedBenchConfig) -> Self {
+        Self {
+            cfg,
+            scene_idx: 0,
+            warmup_left: Self::WARMUP_FRAMES,
+            measure_start: Instant::now(),
+            frame_samples: Vec::new(),
+            tick_cpu_ns: 0,
+            ui_cpu_ns: 0,
+            render_cpu_ns: 0,
+            tess_cpu_ns: 0,
+            present_cpu_ns: 0,
+            sim_ticks: 0,
+            last_plasma_reseed_tick: 0,
+            done: false,
+        }
+    }
+
+    fn current_scene(&self) -> BenchScene {
+        self.cfg.scenes[self.scene_idx]
+    }
+
+    fn setup_scene(&mut self, state: &mut AppState) {
+        let scene = self.current_scene();
+        let (width, height) = self.cfg.canvas;
+        let (width, height) = state.start_new_canvas(width, height);
+        state.screen = AppScreen::InGame;
+        state.engine.bufs.config.render_mode = scene.render_mode();
+        state.engine.bufs.config.hud = self.cfg.hud;
+        state.engine.fps_cap = self.cfg.tps_cap;
+        state.engine.draw_cap = 240;
+        scene.seed(state, width, height);
+        state.engine.bufs.sync_host_to_gpu();
+        state.engine.bufs.refresh_active_count_device();
+
+        self.warmup_left = Self::WARMUP_FRAMES;
+        self.measure_start = Instant::now();
+        self.frame_samples.clear();
+        self.tick_cpu_ns = 0;
+        self.ui_cpu_ns = 0;
+        self.render_cpu_ns = 0;
+        self.tess_cpu_ns = 0;
+        self.present_cpu_ns = 0;
+        self.sim_ticks = 0;
+        self.last_plasma_reseed_tick = state.engine.frame_count;
+    }
+}
 
 /// The `winit` application handler that owns the window, GPU context and
 /// simulation state.
@@ -65,6 +135,8 @@ pub(crate) struct PowderToyApp {
     smoke_reported: bool,
     /// `--voxel-windowed-smoke`: seed the 3D sandbox instead of the 2D scene.
     voxel_smoke: bool,
+    /// `--windowed-bench` harness state; `None` in normal use.
+    windowed_bench: Option<WindowedBenchState>,
 }
 
 impl PowderToyApp {
@@ -166,7 +238,14 @@ impl PowderToyApp {
             smoke_done: false,
             smoke_reported: false,
             voxel_smoke,
+            windowed_bench: None,
         }
+    }
+
+    pub(crate) fn new_windowed_bench(cfg: WindowedBenchConfig) -> Self {
+        let mut app = Self::new(None, false);
+        app.windowed_bench = Some(WindowedBenchState::new(cfg));
+        app
     }
 
     /// Configures Maple Mono Medium as the primary proportional and monospace font.
@@ -248,11 +327,22 @@ impl PowderToyApp {
                 INITIAL_WINDOW_HEIGHT,
             ))
             .with_min_inner_size(LogicalSize::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
-        if let Some((width, height)) = restored_size {
-            attributes = attributes.with_inner_size(PhysicalSize::new(width, height));
-        }
-        if let Some((x, y)) = restored_position {
-            attributes = attributes.with_position(PhysicalPosition::new(x, y));
+        if self.windowed_bench.is_some() {
+            // `--windowed-bench` measures a fixed 1920x1080 window, clamped to
+            // the monitor, so frame timings are comparable between runs.
+            let desired = clamp_window_size((1920, 1080), &monitors);
+            attributes = Window::default_attributes()
+                .with_title(WINDOW_TITLE)
+                .with_resizable(true)
+                .with_inner_size(PhysicalSize::new(desired.0, desired.1))
+                .with_min_inner_size(LogicalSize::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
+        } else {
+            if let Some((width, height)) = restored_size {
+                attributes = attributes.with_inner_size(PhysicalSize::new(width, height));
+            }
+            if let Some((x, y)) = restored_position {
+                attributes = attributes.with_position(PhysicalPosition::new(x, y));
+            }
         }
 
         let window = match event_loop.create_window(attributes) {
@@ -264,12 +354,33 @@ impl PowderToyApp {
             }
         };
 
-        let gpu = GpuContext::new(window.clone(), DEFAULT_XRES, DEFAULT_YRES);
+        let present_mode = match &self.windowed_bench {
+            Some(bench) if !bench.cfg.vsync => wgpu::PresentMode::AutoNoVsync,
+            _ => wgpu::PresentMode::AutoVsync,
+        };
+        let gpu = GpuContext::new_with_present_mode(window.clone(), DEFAULT_XRES, DEFAULT_YRES, present_mode);
         println!("[tpt-app] GPU: {}", gpu.adapter_summary());
 
         let mut state = AppState::new(gpu.cubecl_client.clone());
 
-        if let Some(frames) = self.smoke_ticks {
+        if let Some(bench) = self.windowed_bench.as_mut() {
+            let win_size = window.inner_size();
+            println!(
+                "[windowed-bench] window={}x{} canvas={}x{} present_mode={:?} hud={} tps_cap={}",
+                win_size.width,
+                win_size.height,
+                bench.cfg.canvas.0,
+                bench.cfg.canvas.1,
+                gpu.surface_config.present_mode,
+                bench.cfg.hud,
+                if (bench.cfg.tps_cap - 2.0).abs() < f32::EPSILON {
+                    String::from("uncapped")
+                } else {
+                    format!("{:.0}", bench.cfg.tps_cap)
+                }
+            );
+            bench.setup_scene(&mut state);
+        } else if let Some(frames) = self.smoke_ticks {
             if self.voxel_smoke {
                 // Exercise the dedicated 3D texture, the voxel renderer and
                 // the 3D UI branch in the real window path. A floor plus a
@@ -332,9 +443,26 @@ impl PowderToyApp {
             }
         }
 
+        if let Some(bench) = self.windowed_bench.as_mut()
+            && !bench.done
+            && bench.current_scene().keeps_plasma()
+            && state.engine.frame_count.saturating_sub(bench.last_plasma_reseed_tick) >= 40
+        {
+            let (w, h) = state.canvas_size();
+            seed_bench_plasma(state, w, h);
+            state.engine.bufs.sync_host_to_gpu();
+            bench.last_plasma_reseed_tick = state.engine.frame_count;
+        }
+
+        let frame_t0 = Instant::now();
+        let ticks_before = state.engine.frame_count;
+
         if state.screen == AppScreen::InGame {
             state.tick_frame();
         }
+        let ticks_delta = state.engine.frame_count.saturating_sub(ticks_before);
+        let frame_t1 = Instant::now();
+
         let sim_tex_id = gpu.sim_tex_id;
         let view3d_tex_id = gpu.view3d_tex_id;
         let raw_input = egui_winit.take_egui_input(&window);
@@ -346,9 +474,12 @@ impl PowderToyApp {
                 requested_sim_size = Some(size);
             }
         });
+        let frame_t2 = Instant::now();
+
         resize_sim_texture(gpu, state, requested_sim_size);
         resize_voxel_view(gpu, state);
         render_simulation_frame(state);
+        let frame_t3 = Instant::now();
 
         egui_winit.handle_platform_output(&window, full_output.platform_output);
 
@@ -359,6 +490,7 @@ impl PowderToyApp {
             pixels_per_point,
         };
         upload_egui_textures(gpu, &full_output.textures_delta);
+        let frame_t4 = Instant::now();
 
         // egui wants the `free` half applied *after* painting, but the delta
         // must not be dropped unhandled: `TexturesDelta::drop` asserts on that
@@ -378,8 +510,73 @@ impl PowderToyApp {
                 freed_textures: &freed_textures,
             },
         );
-        self.last_present_instant = Instant::now();
+        let frame_t5 = Instant::now();
+        self.last_present_instant = frame_t5;
         state.sample_presented_frame();
+
+        if let Some(bench) = self.windowed_bench.as_mut()
+            && !bench.done
+        {
+            if bench.warmup_left > 0 {
+                bench.warmup_left -= 1;
+                if bench.warmup_left == 0 {
+                    bench.measure_start = Instant::now();
+                    bench.last_plasma_reseed_tick = state.engine.frame_count;
+                }
+            } else {
+                bench.frame_samples.push(frame_t5 - frame_t0);
+                bench.tick_cpu_ns += (frame_t1 - frame_t0).as_nanos();
+                bench.ui_cpu_ns += (frame_t2 - frame_t1).as_nanos();
+                bench.render_cpu_ns += (frame_t3 - frame_t2).as_nanos();
+                bench.tess_cpu_ns += (frame_t4 - frame_t3).as_nanos();
+                bench.present_cpu_ns += (frame_t5 - frame_t4).as_nanos();
+                bench.sim_ticks += ticks_delta;
+
+                if bench.measure_start.elapsed().as_secs_f64() >= bench.cfg.secs_per_scene {
+                    let _ = gpu.device.poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: None,
+                    });
+                    let total_elapsed = bench.measure_start.elapsed().as_secs_f64();
+                    let frames = bench.frame_samples.len().max(1);
+                    let fps = frames as f64 / total_elapsed;
+                    let tps = bench.sim_ticks as f64 / total_elapsed;
+                    let stats = BenchStats::from_samples(std::mem::take(&mut bench.frame_samples));
+                    let f = frames as f64;
+                    let tick_ms = bench.tick_cpu_ns as f64 / 1_000_000.0 / f;
+                    let ui_ms = bench.ui_cpu_ns as f64 / 1_000_000.0 / f;
+                    let ren_ms = bench.render_cpu_ns as f64 / 1_000_000.0 / f;
+                    let tess_ms = bench.tess_cpu_ns as f64 / 1_000_000.0 / f;
+                    let pres_ms = bench.present_cpu_ns as f64 / 1_000_000.0 / f;
+                    println!(
+                        "[windowed-bench] {}: frames={} ticks={} elapsed={:.2}s -> FPS={:.1} TPS={:.1} | frame mean={:.3} p50={:.3} p95={:.3} max={:.3} ms | cpu(tick={:.3} ui={:.3} ren={:.3} tess={:.3} pres={:.3})",
+                        bench.current_scene().label(),
+                        frames,
+                        bench.sim_ticks,
+                        total_elapsed,
+                        fps,
+                        tps,
+                        stats.mean,
+                        stats.p50,
+                        stats.p95,
+                        stats.max,
+                        tick_ms,
+                        ui_ms,
+                        ren_ms,
+                        tess_ms,
+                        pres_ms,
+                    );
+                    bench.scene_idx += 1;
+                    if bench.scene_idx < bench.cfg.scenes.len() {
+                        bench.setup_scene(state);
+                        let (cw, ch) = state.canvas_size();
+                        gpu.resize_sim_texture(cw, ch);
+                    } else {
+                        bench.done = true;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -441,6 +638,15 @@ impl ApplicationHandler for PowderToyApp {
             .is_some_and(|state| state.exit_requested)
         {
             event_loop.exit();
+            return;
+        }
+        if let Some(bench) = &self.windowed_bench {
+            if bench.done {
+                event_loop.exit();
+                return;
+            }
+            event_loop.set_control_flow(ControlFlow::Poll);
+            self.redraw();
             return;
         }
         if self.smoke_ticks.is_some() {
@@ -517,7 +723,9 @@ impl ApplicationHandler for PowderToyApp {
         self.save_window_geometry();
         // A cap changed by a script that never ran a tick (for example from the
         // console on the main menu) still has to reach `prefs.json`.
-        if let Some(state) = self.state.as_mut() {
+        if self.windowed_bench.is_none()
+            && let Some(state) = self.state.as_mut()
+        {
             state.persist_script_caps();
             // A mode change made by loading a canvas or a save still has to
             // reach `prefs.json`; explicit toggles already saved it.
@@ -542,7 +750,7 @@ impl PowderToyApp {
     /// fullscreen (the fullscreen screen rect would replace the windowed
     /// rectangle the user actually wants restored).
     fn save_window_geometry(&mut self) {
-        if self.smoke_ticks.is_some() {
+        if self.smoke_ticks.is_some() || self.windowed_bench.is_some() {
             return;
         }
         let Some(window) = self.window.clone() else {

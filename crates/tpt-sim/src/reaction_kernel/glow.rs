@@ -16,6 +16,7 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_GLOW, sim_grid};
 use super::shared::{hash_u32, iabs, launch_grid, mix_index, pmap_at, pmap_slot, stasis_frozen};
 use crate::buffers::SimBuffers;
 
@@ -118,11 +119,11 @@ pub(super) fn glow_kernel(
 
 /// Launch the `GLOW` update for one reaction step.
 pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
     unsafe {
         glow_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_GLOW),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),

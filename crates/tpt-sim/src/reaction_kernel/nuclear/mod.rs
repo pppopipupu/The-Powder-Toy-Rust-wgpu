@@ -164,7 +164,15 @@ pub(super) use shields::{
 use cubecl::prelude::*;
 use tpt_core::constants::*;
 
-use super::shared::{CREATE_QUEUE_WORDS, hash_u32, launch_grid, refresh_gpu_free_slots};
+use super::dispatch::{
+    SIM_SLOT_NUC_ANNIHILATE, SIM_SLOT_NUC_CONV, SIM_SLOT_NUC_DEUT, SIM_SLOT_NUC_FREE_WIN,
+    SIM_SLOT_NUC_ISOTOPE, SIM_SLOT_NUC_NBLE_PIX, SIM_SLOT_NUC_NBLE_SLOT, SIM_SLOT_NUC_PRESSURE,
+    SIM_SLOT_NUC_PROT_PIX, SIM_SLOT_NUC_PROT_SLOT, SIM_SLOT_NUC_PTNM, SIM_SLOT_NUC_SHIELD,
+    SIM_SLOT_NUC_VIRUS, SIM_SLOT_NUC_WARP, sim_grid,
+};
+use super::shared::{
+    CREATE_QUEUE_WORDS, hash_u32, launch_grid, refresh_gpu_free_slots_with_grid,
+};
 use super::{PassDims, SimBuffers};
 
 /// `Simulation.h:24`: `int(MAX_TEMP - 73) / 100 + 2`, i.e. the number of
@@ -298,8 +306,12 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     // the deuterium's slot); on a later frame a slot a host edit claimed since
     // the last rebuild could be handed out twice. Collect against the pool as
     // it is now before any kernel below allocates.
-    refresh_gpu_free_slots(bufs);
-    let (pixel_cubes, pixel_dim) = launch_grid(dims.pixels);
+    let has_prot = bufs.has_seen_elem(PT_PROT) || bufs.has_seen_modext();
+    let has_nble = bufs.has_seen_elem(PT_NBLE) || has_prot;
+    if has_nble {
+        refresh_gpu_free_slots_with_grid(bufs, sim_grid(bufs, SIM_SLOT_NUC_FREE_WIN));
+    }
+    let (_pixel_cubes, pixel_dim) = launch_grid(dims.pixels);
     // TPT gates the `URAN` self-heating on `!legacy_enable`; the port models
     // legacy mode as "heat conduction off".
     let legacy = u32::from(!bufs.config.heat_enable);
@@ -307,7 +319,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         pressure_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_NUC_PRESSURE),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -328,71 +340,76 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
         );
     }
 
-    unsafe {
-        nble_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(
-                bufs.gpu_spawn_defaults.clone(),
-                PT_NUM * tpt_core::elements::SPAWN_DEFAULT_WORDS,
-            ),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-            dims.frame_seed,
-        );
-    }
+    let (_slot_cubes, slot_dim) = launch_grid(dims.used_slots);
+    if has_nble {
+        unsafe {
+            nble_kernel::launch_unchecked(
+                &bufs.client,
+                sim_grid(bufs, SIM_SLOT_NUC_NBLE_PIX),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(
+                    bufs.gpu_spawn_defaults.clone(),
+                    PT_NUM * tpt_core::elements::SPAWN_DEFAULT_WORDS,
+                ),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+                dims.frame_seed,
+            );
+        }
 
-    // `NBLE.cpp:64-79`'s same-pixel products, spawned in the reference's order
-    // from the device window (the pixel's energy word goes to the last one).
-    let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
-    unsafe {
-        nble_burst_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
-            CubeDim::new_1d(slot_dim),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_dcolour.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_free_slots.clone(), SimBuffers::GPU_SPAWN_COUNT + 2),
-            dims.xres,
-            dims.yres,
-            dims.used_slots as u32,
-            dims.frame_seed,
-        );
+        // `NBLE.cpp:64-79`'s same-pixel products, spawned in the reference's order
+        // from the device window (the pixel's energy word goes to the last one).
+        unsafe {
+            nble_burst_kernel::launch_unchecked(
+                &bufs.client,
+                sim_grid(bufs, SIM_SLOT_NUC_NBLE_SLOT),
+                CubeDim::new_1d(slot_dim),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_dcolour.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
+                BufferArg::from_raw_parts(
+                    bufs.gpu_free_slots.clone(),
+                    SimBuffers::GPU_SPAWN_COUNT + 2,
+                ),
+                dims.xres,
+                dims.yres,
+                dims.used_slots as u32,
+                dims.frame_seed,
+            );
+        }
     }
 
     unsafe {
         isotope_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_NUC_ISOTOPE),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -408,25 +425,27 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
         );
     }
 
-    unsafe {
-        shield_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
-            dims.xres,
-            dims.yres,
-            dims.frame_seed,
-        );
+    if bufs.has_seen_any(&[PT_SHLD1, PT_SHLD2, PT_SHLD3, PT_SHLD4]) {
+        unsafe {
+            shield_kernel::launch_unchecked(
+                &bufs.client,
+                sim_grid(bufs, SIM_SLOT_NUC_SHIELD),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
+                dims.xres,
+                dims.yres,
+                dims.frame_seed,
+            );
+        }
     }
 
     unsafe {
         annihilate_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_NUC_ANNIHILATE),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -441,48 +460,52 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
         );
     }
 
-    unsafe {
-        virus_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-            dims.frame_seed,
-        );
+    if bufs.has_seen_any(&[PT_VIRS, PT_VRSS, PT_VRSG]) {
+        unsafe {
+            virus_kernel::launch_unchecked(
+                &bufs.client,
+                sim_grid(bufs, SIM_SLOT_NUC_VIRUS),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+                dims.frame_seed,
+            );
+        }
     }
 
-    unsafe {
-        converter_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
-            dims.xres,
-            dims.yres,
-            dims.frame_seed,
-        );
+    if bufs.has_seen_elem(PT_CONV) {
+        unsafe {
+            converter_kernel::launch_unchecked(
+                &bufs.client,
+                sim_grid(bufs, SIM_SLOT_NUC_CONV),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
+                dims.xres,
+                dims.yres,
+                dims.frame_seed,
+            );
+        }
     }
 
     unsafe {
         warp_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_NUC_WARP),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
@@ -499,7 +522,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         deut_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            sim_grid(bufs, SIM_SLOT_NUC_DEUT),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -515,172 +538,183 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
         );
     }
 
-    unsafe {
-        ptnm_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-            dims.frame_seed,
-        );
-    }
-    unsafe {
-        ptnm_hydrogen_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-            dims.frame_seed,
-        );
+    if bufs.has_seen_elem(PT_PTNM) {
+        let ptnm_grid = sim_grid(bufs, SIM_SLOT_NUC_PTNM);
+        unsafe {
+            ptnm_kernel::launch_unchecked(
+                &bufs.client,
+                ptnm_grid.clone(),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+                dims.frame_seed,
+            );
+        }
+        unsafe {
+            ptnm_hydrogen_kernel::launch_unchecked(
+                &bufs.client,
+                ptnm_grid,
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+                dims.frame_seed,
+            );
+        }
     }
 
-    unsafe {
-        prot_under_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
-            dims.xres,
-            dims.yres,
-            dims.frame_seed,
-        );
-    }
-    unsafe {
-        prot_seed_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
-            dims.xres,
-            dims.yres,
-            dims.frame_seed,
-        );
-    }
-    unsafe {
-        prot_heat_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-        );
-    }
-    // The collision is slot parallel: the displaced proton of a shared pixel
-    // has no map entry. It runs after the transmutation so a proton that became
-    // a heavier element this frame no longer matches.
-    let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
-    unsafe {
-        prot_fusion_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
-            CubeDim::new_1d(slot_dim),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
-            dims.xres,
-            dims.yres,
-            dims.used_slots as u32,
-        );
-    }
-    // The implosion reuses the deuterium's slot, so it runs after the heat
-    // pump has equalised that slot's temperature (`PROT.cpp:78-85`).
-    unsafe {
-        prot_implode_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
-            CubeDim::new_1d(pixel_dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-            dims.frame_seed,
-        );
-    }
-    // `DeutImplosion`'s `n` protons are created in the same frame from the
-    // device window, so later passes of this step already see the whole burst.
-    unsafe {
-        prot_burst_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
-            CubeDim::new_1d(slot_dim),
-            BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_dcolour.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_free_slots.clone(), SimBuffers::GPU_SPAWN_COUNT + 2),
-            dims.xres,
-            dims.yres,
-            dims.used_slots as u32,
-            dims.frame_seed,
-        );
+    if has_prot {
+        let prot_pix_grid = sim_grid(bufs, SIM_SLOT_NUC_PROT_PIX);
+        let prot_slot_grid = sim_grid(bufs, SIM_SLOT_NUC_PROT_SLOT);
+        unsafe {
+            prot_under_kernel::launch_unchecked(
+                &bufs.client,
+                prot_pix_grid.clone(),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
+                dims.xres,
+                dims.yres,
+                dims.frame_seed,
+            );
+        }
+        unsafe {
+            prot_seed_kernel::launch_unchecked(
+                &bufs.client,
+                prot_pix_grid.clone(),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
+                dims.xres,
+                dims.yres,
+                dims.frame_seed,
+            );
+        }
+        unsafe {
+            prot_heat_kernel::launch_unchecked(
+                &bufs.client,
+                prot_pix_grid.clone(),
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+            );
+        }
+        // The collision is slot parallel: the displaced proton of a shared pixel
+        // has no map entry. It runs after the transmutation so a proton that became
+        // a heavier element this frame no longer matches.
+        unsafe {
+            prot_fusion_kernel::launch_unchecked(
+                &bufs.client,
+                prot_slot_grid.clone(),
+                CubeDim::new_1d(slot_dim),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
+                dims.xres,
+                dims.yres,
+                dims.used_slots as u32,
+            );
+        }
+        // The implosion reuses the deuterium's slot, so it runs after the heat
+        // pump has equalised that slot's temperature (`PROT.cpp:78-85`).
+        unsafe {
+            prot_implode_kernel::launch_unchecked(
+                &bufs.client,
+                prot_pix_grid,
+                CubeDim::new_1d(pixel_dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_air_pv.clone(), dims.cells),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+                dims.frame_seed,
+            );
+        }
+        // `DeutImplosion`'s `n` protons are created in the same frame from the
+        // device window, so later passes of this step already see the whole burst.
+        unsafe {
+            prot_burst_kernel::launch_unchecked(
+                &bufs.client,
+                prot_slot_grid,
+                CubeDim::new_1d(slot_dim),
+                BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_dcolour.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vx.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_vy.clone(), dims.capacity),
+                BufferArg::from_raw_parts(
+                    bufs.gpu_free_slots.clone(),
+                    SimBuffers::GPU_SPAWN_COUNT + 2,
+                ),
+                dims.xres,
+                dims.yres,
+                dims.used_slots as u32,
+                dims.frame_seed,
+            );
+        }
     }
     // `create_part` rebuilds the whole row for every in-place conversion
-    // (`Simulation.cpp:1941`); this finishes the scratch words the conversion
-    // kernels defer (see `neut::change_type_in_place`).
-    super::neut::launch_row_reset(bufs, dims);
+    // (`Simulation.cpp:1941`); inside `nuclear`, only `nble_kernel` calls
+    // `rebuild_type_in_place`.
+    if has_nble {
+        super::neut::launch_row_reset_with_grid(bufs, dims, sim_grid(bufs, SIM_SLOT_NUC_NBLE_SLOT));
+    }
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ use tpt_core::constants::*;
 use crate::buffers::SimBuffers;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_RAYS_PIX, sim_grid};
 use super::shared::launch_grid;
 
 const C_PT_NONE: u32 = 0;
@@ -117,8 +118,8 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
         return;
     }
 
-    let (cubes, dim) = launch_grid(dims.pixels);
-    let grid = CubeCount::Static(cubes, 1, 1);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let grid = sim_grid(bufs, SIM_SLOT_RAYS_PIX);
     let cube_dim = CubeDim::new_1d(dim);
     let free_len = SimBuffers::GPU_SPAWN_COUNT + 2;
 

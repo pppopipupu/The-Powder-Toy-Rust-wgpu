@@ -241,11 +241,11 @@ pub(crate) fn launch(bufs: &SimBuffers, dims: &PassDims, _seed: u32) {
         return;
     }
     let ycells = (dims.cells / dims.xcells as usize) as u32;
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
     unsafe {
         thermo_update_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::super::dispatch::sim_grid(bufs, super::super::dispatch::SIM_SLOT_MODEXT_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_flags.clone(), dims.capacity),

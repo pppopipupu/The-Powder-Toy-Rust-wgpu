@@ -1,11 +1,10 @@
 //! The device stages of a generation: [`gol_analyze_kernel`] stages the map,
-//! [`gol_update_kernel`] applies it, [`gol_birth_kernel`] turns the surviving
-//! birth votes into creation requests and [`gol_settle_kernel`] folds the
-//! survivor count into the device arm word.
+//! [`gol_update_kernel`] applies it and [`gol_birth_kernel`] turns the
+//! surviving birth votes into creation requests.
 //!
-//! All three per-pixel stages read `counters[0]` first and terminate when it is
-//! clear, so a canvas without `LIFE` pays one atomic load per thread instead of
-//! a host round trip.
+//! Every stage is dispatched through the `SIM_SLOT_GOL_PIX` indirect slot, so a
+//! canvas without a live `LIFE` launches zero workgroups instead of paying a
+//! host round trip.
 
 use cubecl::prelude::*;
 
@@ -109,10 +108,8 @@ fn gol_live_neighbour(
 ///   `ctype`); the count is consumed by the vote and not kept,
 /// * `0` for an empty or non-`LIFE` pixel that cannot change.
 ///
-/// Work item `0` clears the survivor counter the update stage fills in. The two
-/// dispatches are ordered, so the clear happens before any `fetch_add`; the
-/// arm word is *not* cleared here because every thread reads it to decide
-/// whether to run at all.
+/// The two dispatches are ordered, so every pixel of the first stage sees the
+/// same pre-generation map and the update stage reads only `gol_meta`.
 ///
 /// The vote accumulates its winner in the pixel's own word instead of a local:
 /// a local declared outside these loops loses its address when it is assigned
@@ -127,22 +124,12 @@ pub fn gol_analyze_kernel(
     part_tmp2: &[i32],
     gol_rules: &[u32],
     gol_meta: &mut [u32],
-    counters: &mut [Atomic<u32>],
     xres: u32,
     yres: u32,
     capacity: u32,
     num_pixels: u32,
 ) {
     let i = ABSOLUTE_POS;
-    if i == 0usize {
-        counters[1].store(0u32);
-    }
-    // `counters[0]` is the device arm word: the host sets it on a paint or an
-    // edit, and `gol_settle_kernel` keeps it set while the last generation left
-    // a survivor or a birth. When it is clear the whole pass is a no-op.
-    if counters[0].load() == 0u32 {
-        terminate!();
-    }
     if i >= num_pixels as usize {
         terminate!();
     }
@@ -265,7 +252,6 @@ pub fn gol_update_kernel(
     part_ctype: &[u32],
     gol_rules: &[u32],
     gol_meta: &mut [u32],
-    counters: &mut [Atomic<u32>],
     wall_bmap: &[u32],
     wall_emap: &[u32],
     xres: u32,
@@ -273,9 +259,6 @@ pub fn gol_update_kernel(
     capacity: u32,
     num_pixels: u32,
 ) {
-    if counters[0].load() == 0u32 {
-        terminate!();
-    }
     let i = ABSOLUTE_POS;
     if i >= num_pixels as usize {
         terminate!();
@@ -297,45 +280,34 @@ pub fn gol_update_kernel(
 
     if (meta & META_OWN_LIFE) != 0u32 {
         let slot = payload as usize;
-        if payload < capacity && part_ty[slot] == PT_LIFE_U32 {
-            if (meta & META_BORDER) != 0u32 {
-                // Border cells never evolve but still keep the pass alive.
-                counters[1].fetch_add(1u32);
-            } else {
-                let rule = gol_resolve(part_ctype[slot], gol_rules);
-                let max_state = (((rule >> 17u32) & 0xFu32) + 1u32) as i32;
-                // `SimulateGoL:3462` only treats a cell with
-                // `tmp2 == states` as live. A cell created without the create
-                // hook has `tmp2 == 0` and is already dying, so the reference
-                // advances it to `-1` and kills it (`Simulation.cpp:3505-3511`,
-                // `:3595-3603`); no revive branch here.
-                let mut t2 = 0i32;
-                t2 += part_tmp2[slot];
-                if t2 < max_state {
-                    // A dying cell advances one state per generation (unless a
-                    // stasis wall freezes it).
-                    let mut next = 0i32;
-                    next += t2;
-                    if !frozen {
-                        next -= 1i32;
-                    }
-                    part_tmp2[slot] = next;
-                    if next <= 0i32 {
-                        part_ty[slot] = PT_NONE_U32;
-                    } else {
-                        counters[1].fetch_add(1u32);
-                    }
-                } else if t2 == max_state && !frozen && ((rule >> neighbours) & 1u32) == 0u32 {
-                    // Start the death sequence.
-                    let next = max_state - 1i32;
-                    part_tmp2[slot] = next;
-                    if next <= 0i32 {
-                        part_ty[slot] = PT_NONE_U32;
-                    } else {
-                        counters[1].fetch_add(1u32);
-                    }
-                } else {
-                    counters[1].fetch_add(1u32);
+        if payload < capacity && part_ty[slot] == PT_LIFE_U32 && (meta & META_BORDER) == 0u32 {
+            let rule = gol_resolve(part_ctype[slot], gol_rules);
+            let max_state = (((rule >> 17u32) & 0xFu32) + 1u32) as i32;
+            // `SimulateGoL:3462` only treats a cell with
+            // `tmp2 == states` as live. A cell created without the create
+            // hook has `tmp2 == 0` and is already dying, so the reference
+            // advances it to `-1` and kills it (`Simulation.cpp:3505-3511`,
+            // `:3595-3603`); no revive branch here.
+            let mut t2 = 0i32;
+            t2 += part_tmp2[slot];
+            if t2 < max_state {
+                // A dying cell advances one state per generation (unless a
+                // stasis wall freezes it).
+                let mut next = 0i32;
+                next += t2;
+                if !frozen {
+                    next -= 1i32;
+                }
+                part_tmp2[slot] = next;
+                if next <= 0i32 {
+                    part_ty[slot] = PT_NONE_U32;
+                }
+            } else if t2 == max_state && !frozen && ((rule >> neighbours) & 1u32) == 0u32 {
+                // Start the death sequence.
+                let next = max_state - 1i32;
+                part_tmp2[slot] = next;
+                if next <= 0i32 {
+                    part_ty[slot] = PT_NONE_U32;
                 }
             }
         }
@@ -366,15 +338,11 @@ pub fn gol_birth_kernel(
     gol_rules: &[u32],
     gol_meta: &mut [u32],
     create_queue: &mut [Atomic<u32>],
-    counters: &mut [Atomic<u32>],
     capacity: u32,
     xres: u32,
     yres: u32,
     num_pixels: u32,
 ) {
-    if counters[0].load() == 0u32 {
-        terminate!();
-    }
     let i = ABSOLUTE_POS;
     if i >= num_pixels as usize {
         terminate!();
@@ -439,28 +407,4 @@ pub fn gol_birth_kernel(
         0.0f32,
         0.0f32,
     );
-    // A queued birth is a reason to run the next generation even when every
-    // current cell died producing it.
-    counters[1].fetch_add(1u32);
-}
-
-/// Stage 4: copy the generation's survivor count into the arm word.
-///
-/// Runs as a single thread after the update and birth stages, so the next
-/// frame's per-pixel stages can decide on the device whether the pass has
-/// anything to do. The host never reads this back.
-#[cube(launch_unchecked)]
-pub fn gol_settle_kernel(counters: &mut [Atomic<u32>]) {
-    if ABSOLUTE_POS == 0usize {
-        let alive = counters[1].load();
-        let armed = counters[0].load();
-        let mut next = 0u32;
-        if armed != 0u32 && alive != 0u32 {
-            next = 1u32;
-        }
-        counters[0].store(next);
-        if next == 0u32 {
-            counters[1].store(0u32);
-        }
-    }
 }

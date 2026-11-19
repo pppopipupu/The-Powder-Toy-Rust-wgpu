@@ -244,6 +244,26 @@ pub struct SimBuffers {
     /// is what makes a canvas of sand or steam cheap to render.
     pub fx_cell: Vec<u32>,
     pub gpu_fx_cell: Handle,
+    /// Indirect-dispatch table populated on the device for conditional render passes.
+    pub gpu_render_ctrl: Handle,
+    /// Active element bitmask (`8 x u32` = 256 element bits) computed on the device.
+    pub gpu_elem_mask: Handle,
+    /// Indirect-dispatch table populated on the device for conditional simulation passes.
+    pub gpu_sim_dispatch: Handle,
+    /// Constant element-mask LUT used by `prepare_sim_dispatch_kernel`.
+    pub gpu_sim_dispatch_lut: Handle,
+    /// Conservative host-side upper bound (`4 x u64` = 256 bits) of element IDs
+    /// (including `ctype`s) ever introduced since the last clear/resize.
+    ///
+    /// Used strictly to skip host-side launches for mathematically closed
+    /// subsystems (e.g. `modext`, `pipe`, `inst`, `force`, `gol`, `portals`,
+    /// `rays`, `stickman`, `love`, `bism`) whose elements cannot be synthesised
+    /// by any other pass. Device-side indirect dispatch (`gpu_sim_dispatch`)
+    /// still gates every pass once a bit is set.
+    pub host_seen_elem_mask: [u64; 4],
+    /// `true` once `modext` has launched since the last clear of
+    /// `gpu_elem_block_air*` / `gpu_grav_mass_override*`.
+    pub modext_block_dirty: bool,
     /// Rows (`0..yres`) followed by columns (`yres..yres + xres`) that hold at
     /// least one spark/flare pixel.
     ///
@@ -409,10 +429,6 @@ pub struct SimBuffers {
     /// Movement LUT (element meta + `PT_NUM * PT_NUM` can-move matrix), rebuilt
     /// only when the element registry changes.
     pub gpu_move_lut: Handle,
-    /// Legacy per-element physics allocation. The physics words live in the
-    /// tail of `gpu_move_lut`, so only word 0 is bound: the `LOVE` / `LOLZ`
-    /// `elementCount` gate (`reaction_kernel::love`).
-    pub gpu_elem_phys: Handle,
     /// Per-element "lives in the photons layer" mask.
     pub gpu_photon_mask: Handle,
     /// `true` when the three movement tables above are out of date.
@@ -468,6 +484,8 @@ pub struct SimBuffers {
     pub gpu_spawn_defaults: Handle,
     /// Host copy of [`Self::gpu_spawn_defaults`].
     pub spawn_defaults_host: Vec<u32>,
+    /// Registry [`ElementRegistry::generation`] mirrored by the GPU tables.
+    pub elem_table_generation: u64,
 
     pub rigid_bodies: Vec<RigidBody2D>,
     pub(crate) pending_live_count: Option<crate::live_count::PendingLiveCount>,
@@ -538,6 +556,38 @@ impl SimBuffers {
             self.next_slot
         };
         bound.clamp(1, self.capacity)
+    }
+
+    /// Record an element ID (or `ctype`) as having been introduced onto the
+    /// canvas since the last clear/resize.
+    #[inline]
+    pub fn note_elem_seen(&mut self, ty: u32) {
+        let id = ty as usize;
+        if id > 0 && id < 256 {
+            self.host_seen_elem_mask[id >> 6] |= 1u64 << (id & 63);
+        }
+    }
+
+    /// `true` if `ty` has been introduced since the last clear/resize.
+    #[inline]
+    pub fn has_seen_elem(&self, ty: u32) -> bool {
+        let id = ty as usize;
+        id < 256 && (self.host_seen_elem_mask[id >> 6] & (1u64 << (id & 63))) != 0
+    }
+
+    /// `true` if any element in `ids` has been introduced since the last clear/resize.
+    #[inline]
+    pub fn has_seen_any(&self, ids: &[u32]) -> bool {
+        ids.iter().any(|&ty| self.has_seen_elem(ty))
+    }
+
+    /// `true` if any `modext` element (`195..=238`) has been introduced since
+    /// the last clear/resize.
+    #[inline]
+    pub fn has_seen_modext(&self) -> bool {
+        // 195 = 3*64 + 3, 238 = 3*64 + 46 -> bits 3..=46 of word 3.
+        const MODEXT_WORD3: u64 = ((1u64 << 47) - 1) ^ ((1u64 << 3) - 1);
+        (self.host_seen_elem_mask[3] & MODEXT_WORD3) != 0
     }
 
     /// Pixel index for `(x, y)`, `None` when outside the canvas.

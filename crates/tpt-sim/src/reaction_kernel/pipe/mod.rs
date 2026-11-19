@@ -328,11 +328,11 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
         return;
     }
 
-    let (cubes, dim) = launch_grid(dims.pixels);
-    let grid = CubeCount::Static(cubes, 1, 1);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let grid = super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_PIPE_PIX);
     let cube_dim = CubeDim::new_1d(dim);
-    let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
-    let slot_grid = CubeCount::Static(slot_cubes, 1, 1);
+    let (_slot_cubes, slot_dim) = launch_grid(dims.used_slots);
+    let slot_grid = super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_PIPE_SLOT);
     let slot_cube_dim = CubeDim::new_1d(slot_dim);
 
     for _ in 0..FLOOD_ROUNDS {

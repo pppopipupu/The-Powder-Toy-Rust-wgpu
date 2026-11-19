@@ -4,16 +4,17 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::super::framebuffer::{
-    add_px, blend_px, fb_blue, fb_green, fb_red, pack_rgb, rgb_from_u32,
+    add_px, blend_px, fb_blue, fb_green, fb_red, pack_rgb, rgb_from_u32, seed_u32,
 };
 use super::super::{
-    ELEM_COLA, ELEM_COLOUR, ELEM_HIGH_TEMP, ELEM_PIXEL_MODE, ELEM_PROPS, ELEM_WORDS, FX_GLOW,
-    FX_PMBLUR, FX_PMGLOW, FX_SPARK, PMAP_ID_SHIFT, PMAP_TYPE_MASK, PMODE_ADD, PMODE_BLEND,
-    PMODE_BLOB, PMODE_BLUR, PMODE_FLARE, PMODE_FLAT, PMODE_GLOW, PMODE_LFLARE, PMODE_SPARK,
+    ELEM_COLA, ELEM_COLOUR, ELEM_HIGH_TEMP, ELEM_PIXEL_MODE, ELEM_PROPS, ELEM_WORDS,
+    FIREMODE, FX_FIRE_ENERGY, FX_FIRE_MATTER, FX_GLOW, FX_PMBLOB, FX_PMBLUR, FX_PMGLOW, FX_SPARK,
+    FX_STICKMAN, PMAP_ID_SHIFT, PMAP_TYPE_MASK, PMODE_ADD, PMODE_BLEND, PMODE_BLOB, PMODE_BLUR,
+    PMODE_FLARE, PMODE_FLAT, PMODE_GLOW, PMODE_LFLARE, PMODE_SPARK,
 };
 use super::colour::{particle_cola, particle_rgb};
 use super::elements_special::pipe_pixel_mode;
-use super::pixel_mode::{effective_pixel_mode, fancy_view};
+use super::pixel_mode::{effective_pixel_mode, fancy_view, may_emit_fire};
 use super::{EFFECT_LINES, packed_at};
 
 /// TPT `Renderer.cpp:527-538` `EFFECT_LINES`: a `SOAP` particle attached at both
@@ -212,6 +213,263 @@ pub(crate) fn soap_outline(
     dst
 }
 
+/// Draws one pixel of the base particle layer and returns its global effect
+/// summary bits (`FX_*`) for indirect render pass scheduling.
+#[cube]
+#[allow(clippy::too_many_arguments)]
+fn render_base_pixel(
+    idx: u32,
+    photons: &[u32],
+    pmap: &[u32],
+    part_flags: &[u32],
+    part_life: &[i32],
+    part_ctype: &[u32],
+    part_temp: &[f32],
+    part_dcolour: &[u32],
+    part_tmp: &[i32],
+    part_tmp2: &[i32],
+    part_tmp3: &[i32],
+    part_tmp4: &[i32],
+    part_vx: &[f32],
+    part_vy: &[f32],
+    elem_props: &[u32],
+    framebuf: &mut [u32],
+    fx_cell: &mut [Atomic<u32>],
+    xres: u32,
+    yres: u32,
+    render_mode: u32,
+    colour_mode: u32,
+    decoration_level: u32,
+    pretty_powder: u32,
+    elem_count: u32,
+    hdisp_min: f32,
+    hdisp_max: f32,
+    tick: u32,
+) -> u32 {
+    let mut all_fx = seed_u32(idx, 0u32);
+    let px = (idx % xres) as i32;
+    let py = (idx / xres) as i32;
+    let fancy = fancy_view(render_mode);
+    // The energy layer is drawn over the matter layer.
+    let phot_packed = photons[idx as usize];
+    let pmap_packed = pmap[idx as usize];
+    let is_energy = phot_packed != 0u32;
+    let packed = if is_energy { phot_packed } else { pmap_packed };
+
+    // If an energy particle overlaps a matter particle in the same pixel, check
+    // the underlying matter type conservatively so indirect fire/stickman skips
+    // never miss an occluded emitter or stickman/portal particle.
+    if is_energy && pmap_packed != 0u32 {
+        let mty = pmap_packed & PMAP_TYPE_MASK;
+        let mbase = (mty % elem_count) * ELEM_WORDS;
+        let mstatic = elem_props[(mbase + ELEM_PIXEL_MODE) as usize];
+        if may_emit_fire(mty, mstatic) {
+            all_fx |= FX_FIRE_MATTER;
+        }
+        if mty == R_PT_FIGH
+            || mty == R_PT_STKM
+            || mty == R_PT_STKM2
+            || mty == R_PT_PRTI
+            || mty == R_PT_PRTO
+        {
+            all_fx |= FX_STICKMAN;
+        }
+    }
+
+    if packed != 0u32 {
+        let pid = packed >> PMAP_ID_SHIFT;
+        if pid != 0u32 {
+            let slot = (pid - 1u32) as usize;
+            if slot < part_life.len() {
+                let ty = packed & PMAP_TYPE_MASK;
+                // Element ids are `< PT_NUM`, but a stale map must never index
+                // outside the uploaded property table.
+                let lut_ty = ty % elem_count;
+                let base = lut_ty * ELEM_WORDS;
+                let colour = elem_props[(base + ELEM_COLOUR) as usize];
+                let props = elem_props[(base + ELEM_PROPS) as usize];
+                let high_temp = f32::reinterpret(elem_props[(base + ELEM_HIGH_TEMP) as usize]);
+
+                let life = part_life[slot];
+                let temp = part_temp[slot];
+                let ctype = part_ctype[slot];
+                let dcolour = part_dcolour[slot];
+                let flags = part_flags[slot];
+                let tmp = part_tmp[slot];
+                let tmp2 = part_tmp2[slot];
+                let tmp3 = part_tmp3[slot];
+                let tmp4 = part_tmp4[slot];
+                let vx = part_vx[slot];
+                let vy = part_vy[slot];
+
+                // `PIPE.cpp:349-352`: a loaded pipe draws with the cargo's
+                // mode, so the cargo's row is resolved before the dynamic
+                // rules run.
+                let pixel_mode = pipe_pixel_mode(
+                    elem_props[(base + ELEM_PIXEL_MODE) as usize],
+                    ty,
+                    ctype,
+                    elem_props,
+                    elem_count,
+                );
+
+                let mode = effective_pixel_mode(
+                    pixel_mode,
+                    ty,
+                    life,
+                    ctype,
+                    temp,
+                    tmp,
+                    tmp2,
+                    tmp3,
+                    tmp4,
+                    flags,
+                    pid,
+                    tick,
+                    render_mode,
+                    colour_mode,
+                    vx,
+                    vy,
+                );
+                // Mark the cell for the nine-tap glow and spark gathers.
+                // `fetch_or` because the sixteen pixels of a cell report
+                // concurrently, and one particle may need both bits.
+                let cell = ((idx / xres) >> 2u32) * (xres >> 2u32) + ((idx % xres) >> 2u32);
+                let mut fx = 0u32;
+                if (mode & (PMODE_BLOB | PMODE_GLOW | PMODE_BLUR)) != 0u32 {
+                    fx |= FX_GLOW;
+                }
+                if (mode & PMODE_BLOB) != 0u32 {
+                    fx |= FX_PMBLOB;
+                }
+                if (mode & PMODE_GLOW) != 0u32 {
+                    fx |= FX_PMGLOW;
+                }
+                if (mode & PMODE_BLUR) != 0u32 {
+                    fx |= FX_PMBLUR;
+                }
+                if (mode & (PMODE_SPARK | PMODE_FLARE | PMODE_LFLARE)) != 0u32 {
+                    fx |= FX_SPARK;
+                }
+                if fx != 0u32 {
+                    fx_cell[cell as usize].fetch_or(fx);
+                    all_fx |= fx;
+                }
+                if (mode & FIREMODE) != 0u32 {
+                    if is_energy {
+                        all_fx |= FX_FIRE_ENERGY;
+                    } else {
+                        all_fx |= FX_FIRE_MATTER;
+                    }
+                }
+                if ty == R_PT_FIGH
+                    || ty == R_PT_STKM
+                    || ty == R_PT_STKM2
+                    || ty == R_PT_PRTI
+                    || ty == R_PT_PRTO
+                {
+                    all_fx |= FX_STICKMAN;
+                }
+                let rgb = particle_rgb(
+                    ty,
+                    colour,
+                    props,
+                    high_temp,
+                    temp,
+                    life,
+                    ctype,
+                    pid,
+                    px,
+                    py,
+                    dcolour,
+                    colour_mode,
+                    pretty_powder,
+                    mode,
+                    fancy,
+                    tmp,
+                    tmp2,
+                    tmp3,
+                    tmp4,
+                    vx,
+                    vy,
+                    tick,
+                    hdisp_min,
+                    hdisp_max,
+                    decoration_level,
+                    elem_props,
+                    elem_count,
+                );
+                // TPT composites `PMODE_BLEND`/`PMODE_ADD` with `cola`;
+                // `PMODE_FLAT` ignores it.
+                let cola = particle_cola(
+                    ty,
+                    elem_props[(base + ELEM_COLA) as usize],
+                    life,
+                    ctype,
+                    tmp,
+                    tmp2,
+                    tmp3,
+                    tmp4,
+                    colour_mode,
+                    elem_props,
+                    elem_count,
+                ) as f32;
+                let mut dst = framebuf[idx as usize];
+                // `Renderer.cpp:527-538`: the `EFFECT_LINES` bond is drawn
+                // before the particle's own pixel mode.
+                dst = soap_outline(
+                    dst,
+                    rgb,
+                    cola as u32,
+                    mode,
+                    ty,
+                    ctype,
+                    tmp,
+                    slot as u32,
+                    idx,
+                    pmap,
+                    photons,
+                    part_flags,
+                    part_life,
+                    part_ctype,
+                    part_temp,
+                    part_dcolour,
+                    part_tmp,
+                    part_tmp2,
+                    part_tmp3,
+                    part_tmp4,
+                    part_vx,
+                    part_vy,
+                    elem_props,
+                    framebuf,
+                    xres,
+                    yres,
+                    colour_mode,
+                    pretty_powder,
+                    elem_count,
+                    hdisp_min,
+                    hdisp_max,
+                    decoration_level,
+                    fancy,
+                    tick,
+                );
+                // TPT order: FLAT overwrites, then BLEND, then ADD.
+                if (mode & PMODE_FLAT) != 0u32 {
+                    dst = rgb;
+                }
+                if (mode & PMODE_BLEND) != 0u32 {
+                    dst = blend_px(dst, rgb, cola);
+                }
+                if (mode & PMODE_ADD) != 0u32 {
+                    dst = add_px(dst, rgb, cola);
+                }
+                framebuf[idx as usize] = dst;
+            }
+        }
+    }
+    all_fx
+}
+
 /// Colours every particle pixel: `PMODE_FLAT`, `PMODE_BLEND` and `PMODE_ADD`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
@@ -244,186 +502,75 @@ pub fn render_particles_base_kernel(
     tick: u32,
 ) {
     let idx = ABSOLUTE_POS as u32;
+    let mut all_fx = seed_u32(xres, 0u32);
     if idx < xres * yres {
-        let px = (idx % xres) as i32;
-        let py = (idx / xres) as i32;
-        let fancy = fancy_view(render_mode);
-        // The energy layer is drawn over the matter layer.
-        let mut packed = photons[idx as usize];
-        if packed == 0u32 {
-            packed = pmap[idx as usize];
-        }
-        if packed != 0u32 {
-            let pid = packed >> PMAP_ID_SHIFT;
-            if pid != 0u32 {
-                let slot = (pid - 1u32) as usize;
-                if slot < part_life.len() {
-                    let ty = packed & PMAP_TYPE_MASK;
-                    // Element ids are `< PT_NUM`, but a stale map must never index
-                    // outside the uploaded property table.
-                    let lut_ty = ty % elem_count;
-                    let base = lut_ty * ELEM_WORDS;
-                    let colour = elem_props[(base + ELEM_COLOUR) as usize];
-                    let props = elem_props[(base + ELEM_PROPS) as usize];
-                    let high_temp = f32::reinterpret(elem_props[(base + ELEM_HIGH_TEMP) as usize]);
-
-                    let life = part_life[slot];
-                    let temp = part_temp[slot];
-                    let ctype = part_ctype[slot];
-                    let dcolour = part_dcolour[slot];
-                    let flags = part_flags[slot];
-                    let tmp = part_tmp[slot];
-                    let tmp2 = part_tmp2[slot];
-                    let tmp3 = part_tmp3[slot];
-                    let tmp4 = part_tmp4[slot];
-                    let vx = part_vx[slot];
-                    let vy = part_vy[slot];
-
-                    // `PIPE.cpp:349-352`: a loaded pipe draws with the cargo's
-                    // mode, so the cargo's row is resolved before the dynamic
-                    // rules run.
-                    let pixel_mode = pipe_pixel_mode(
-                        elem_props[(base + ELEM_PIXEL_MODE) as usize],
-                        ty,
-                        ctype,
-                        elem_props,
-                        elem_count,
-                    );
-
-                    let mode = effective_pixel_mode(
-                        pixel_mode,
-                        ty,
-                        life,
-                        ctype,
-                        temp,
-                        tmp,
-                        tmp2,
-                        tmp3,
-                        tmp4,
-                        flags,
-                        pid,
-                        tick,
-                        render_mode,
-                        colour_mode,
-                        vx,
-                        vy,
-                    );
-                    // Mark the cell for the nine-tap glow and spark gathers.
-                    // `fetch_or` because the sixteen pixels of a cell report
-                    // concurrently, and one particle may need both bits.
-                    let cell = ((idx / xres) >> 2u32) * (xres >> 2u32) + ((idx % xres) >> 2u32);
-                    let mut fx = 0u32;
-                    if (mode & (PMODE_BLOB | PMODE_GLOW | PMODE_BLUR)) != 0u32 {
-                        fx |= FX_GLOW;
-                    }
-                    if (mode & PMODE_GLOW) != 0u32 {
-                        fx |= FX_PMGLOW;
-                    }
-                    if (mode & PMODE_BLUR) != 0u32 {
-                        fx |= FX_PMBLUR;
-                    }
-                    if (mode & (PMODE_SPARK | PMODE_FLARE | PMODE_LFLARE)) != 0u32 {
-                        fx |= FX_SPARK;
-                    }
-                    if fx != 0u32 {
-                        fx_cell[cell as usize].fetch_or(fx);
-                    }
-                    let rgb = particle_rgb(
-                        ty,
-                        colour,
-                        props,
-                        high_temp,
-                        temp,
-                        life,
-                        ctype,
-                        pid,
-                        px,
-                        py,
-                        dcolour,
-                        colour_mode,
-                        pretty_powder,
-                        mode,
-                        fancy,
-                        tmp,
-                        tmp2,
-                        tmp3,
-                        tmp4,
-                        vx,
-                        vy,
-                        tick,
-                        hdisp_min,
-                        hdisp_max,
-                        decoration_level,
-                        elem_props,
-                        elem_count,
-                    );
-                    // TPT composites `PMODE_BLEND`/`PMODE_ADD` with `cola`;
-                    // `PMODE_FLAT` ignores it.
-                    let cola = particle_cola(
-                        ty,
-                        elem_props[(base + ELEM_COLA) as usize],
-                        life,
-                        ctype,
-                        tmp,
-                        tmp2,
-                        tmp3,
-                        tmp4,
-                        colour_mode,
-                        elem_props,
-                        elem_count,
-                    ) as f32;
-                    let mut dst = framebuf[idx as usize];
-                    // `Renderer.cpp:527-538`: the `EFFECT_LINES` bond is drawn
-                    // before the particle's own pixel mode.
-                    dst = soap_outline(
-                        dst,
-                        rgb,
-                        cola as u32,
-                        mode,
-                        ty,
-                        ctype,
-                        tmp,
-                        slot as u32,
-                        idx,
-                        pmap,
-                        photons,
-                        part_flags,
-                        part_life,
-                        part_ctype,
-                        part_temp,
-                        part_dcolour,
-                        part_tmp,
-                        part_tmp2,
-                        part_tmp3,
-                        part_tmp4,
-                        part_vx,
-                        part_vy,
-                        elem_props,
-                        framebuf,
-                        xres,
-                        yres,
-                        colour_mode,
-                        pretty_powder,
-                        elem_count,
-                        hdisp_min,
-                        hdisp_max,
-                        decoration_level,
-                        fancy,
-                        tick,
-                    );
-                    // TPT order: FLAT overwrites, then BLEND, then ADD.
-                    if (mode & PMODE_FLAT) != 0u32 {
-                        dst = rgb;
-                    }
-                    if (mode & PMODE_BLEND) != 0u32 {
-                        dst = blend_px(dst, rgb, cola);
-                    }
-                    if (mode & PMODE_ADD) != 0u32 {
-                        dst = add_px(dst, rgb, cola);
-                    }
-                    framebuf[idx as usize] = dst;
-                }
-            }
+        all_fx = render_base_pixel(
+            idx,
+            photons,
+            pmap,
+            part_flags,
+            part_life,
+            part_ctype,
+            part_temp,
+            part_dcolour,
+            part_tmp,
+            part_tmp2,
+            part_tmp3,
+            part_tmp4,
+            part_vx,
+            part_vy,
+            elem_props,
+            framebuf,
+            fx_cell,
+            xres,
+            yres,
+            render_mode,
+            colour_mode,
+            decoration_level,
+            pretty_powder,
+            elem_count,
+            hdisp_min,
+            hdisp_max,
+            tick,
+        );
+    }
+    let mut sm = Shared::<[u32]>::new_slice(256usize);
+    let tid = UNIT_POS_X as usize;
+    sm[tid] = all_fx;
+    sync_cube();
+    if tid < 128usize {
+        sm[tid] |= sm[tid + 128usize];
+    }
+    sync_cube();
+    if tid < 64usize {
+        sm[tid] |= sm[tid + 64usize];
+    }
+    sync_cube();
+    if tid < 32usize {
+        sm[tid] |= sm[tid + 32usize];
+    }
+    sync_cube();
+    if tid < 16usize {
+        sm[tid] |= sm[tid + 16usize];
+    }
+    sync_cube();
+    if tid < 8usize {
+        sm[tid] |= sm[tid + 8usize];
+    }
+    sync_cube();
+    if tid < 4usize {
+        sm[tid] |= sm[tid + 4usize];
+    }
+    sync_cube();
+    if tid < 2usize {
+        sm[tid] |= sm[tid + 2usize];
+    }
+    sync_cube();
+    if tid == 0usize {
+        let sum = sm[0usize] | sm[1usize];
+        if sum != 0u32 {
+            let summary_idx = ((xres >> 2u32) * (yres >> 2u32)) as usize;
+            fx_cell[summary_idx].fetch_or(sum);
         }
     }
 }

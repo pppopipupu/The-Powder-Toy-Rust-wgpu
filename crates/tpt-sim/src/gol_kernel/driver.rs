@@ -10,11 +10,11 @@ use tpt_core::elements::ElementRegistry;
 
 use crate::SimulationEngine;
 use crate::buffers::SimBuffers;
-use crate::buffers::gpu_sync::upload;
+use crate::reaction_kernel::dispatch::{SIM_SLOT_GOL_PIX, sim_grid};
 
-use super::kernels::{gol_analyze_kernel, gol_birth_kernel, gol_settle_kernel, gol_update_kernel};
+use super::kernels::{gol_analyze_kernel, gol_birth_kernel, gol_update_kernel};
 use super::rules::{BUILTIN_GOL, GOL_RULE_MASK, NGOL, gol_colours, gol_max_state};
-use super::{COUNTER_WORDS, CUBE_DIM, GOL_PROBE_INTERVAL};
+use super::CUBE_DIM;
 
 /// Words in `SimBuffers::gpu_create_queue` (`[count, record * GPU_CREATE_COUNT]`,
 /// see `reaction_kernel::shared::request_create`).
@@ -28,8 +28,6 @@ struct GolScratch {
     rules: Handle,
     /// One packed analysis word per pixel.
     meta: Handle,
-    /// `[armed, survivor_count]`.
-    counters: Handle,
     /// Canvas size the buffers were sized for.
     pixels: usize,
 }
@@ -38,23 +36,12 @@ struct GolScratch {
 #[derive(Default)]
 pub struct GolState {
     scratch: Option<GolScratch>,
-    /// `true` once the host has armed the device gate.
-    ///
-    /// The device settles the word itself once a generation has no survivors,
-    /// but learning that would need a read-back, so this stays set: it is a
-    /// host-side lower bound used by [`Self::is_active`], not the authority.
-    armed: bool,
     /// Generations executed since the engine started.
     pub generations: u64,
     /// `CGOL`: frames elapsed since the last generation (`SimulateGoL` resets
     /// it at the top of every run, `Simulation.cpp:3446`). `GSPEED` frames per
     /// generation.
     pub cgol: u32,
-    /// Frames until the next detection probe.
-    probe_wait: u32,
-    /// `SimBuffers::active_count` observed at the end of the last step; a
-    /// difference means the host created or destroyed particles.
-    host_particles_seen: usize,
 }
 
 impl GolState {
@@ -63,21 +50,11 @@ impl GolState {
         Self::default()
     }
 
-    /// `true` once a `LIFE` pixel may exist (`LIFE` was painted, loaded or
-    /// created through a host command since [`Self::reset`]).
-    ///
-    /// The pass itself is gated by a device word so the host never has to read
-    /// the survivor counter back; this flag is only an approximation.
-    pub fn is_active(&self) -> bool {
-        self.armed
-    }
-
     /// Requests a generation on the next step.
     ///
     /// The palette calls this after painting `LIFE`, so a fresh cell evolves
-    /// immediately instead of waiting for the periodic detection probe.
+    /// immediately instead of waiting for the next `GSPEED` window.
     pub fn wake(&mut self) {
-        self.probe_wait = 0;
         // `GSPEED` counts frames since the last generation; a fresh paint
         // starts that clock over so the first generation is not delayed.
         self.cgol = 0;
@@ -89,9 +66,6 @@ impl GolState {
     /// to the old canvas and the next step allocates new ones.
     pub fn reset(&mut self) {
         self.scratch = None;
-        self.armed = false;
-        self.probe_wait = 0;
-        self.host_particles_seen = 0;
         self.cgol = 0;
     }
 
@@ -113,24 +87,21 @@ impl GolState {
         let scratch = GolScratch {
             rules: client.create_from_slice(bytemuck::cast_slice(&table)),
             meta: client.empty(pixels.max(1) * 4),
-            counters: client.create_from_slice(bytemuck::cast_slice(&[0u32; COUNTER_WORDS])),
             pixels,
         };
         self.scratch = Some(scratch.clone());
-        self.armed = false;
-        self.probe_wait = 0;
         scratch
     }
 }
 
 /// Runs one Game of Life generation.
 ///
-/// The whole skip decision stays on the device: `counters[0]` is an arm word
-/// the host sets with a one-word upload when [`GolState::wake`] or a host edit
-/// asks for a run, and `gol_settle_kernel` keeps it set while the last
-/// generation left a survivor or queued a birth. Every per-pixel stage reads
-/// the word first and terminates immediately when it is clear, so an idle
-/// canvas costs a few dispatches of early-outs and no host read-back.
+/// The whole skip decision stays on the device: the element mask populated by
+/// `reaction_kernel::dispatch::prepare_sim_dispatch` resolves the
+/// `SIM_SLOT_GOL_PIX` indirect-dispatch slot, so a canvas without a live `LIFE`
+/// launches zero workgroups and costs no host read-back. The host-side
+/// [`SimBuffers::has_seen_elem`] gate in `SimulationEngine::step` only skips
+/// the group while `LIFE` has never been introduced.
 ///
 /// Births are queued as `reaction_kernel::shared::request_create` records into
 /// `SimBuffers::gpu_create_queue` and materialised by
@@ -170,30 +141,17 @@ pub fn step_gol_gpu(
     gol.cgol = 0;
 
     let scratch = gol.prepare(&bufs.client, pixels);
-
-    let host_touched = bufs.host_particles_dirty || bufs.active_count != gol.host_particles_seen;
-    if host_touched || gol.probe_wait == 0 {
-        // A paint, a save restore or a Lua `sim.partCreate` may have created a
-        // `LIFE` the device does not know about yet. One word, no read-back.
-        upload(&bufs.client, &scratch.counters, &[1u32]);
-        gol.armed = true;
-        gol.probe_wait = GOL_PROBE_INTERVAL;
-    } else {
-        gol.probe_wait = gol.probe_wait.saturating_sub(1);
-    }
-
-    let cubes = (pixels as u32).div_ceil(CUBE_DIM).max(1);
+    let gol_grid = sim_grid(bufs, SIM_SLOT_GOL_PIX);
     unsafe {
         gol_analyze_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::new_1d(cubes),
+            gol_grid.clone(),
             CubeDim::new_1d(CUBE_DIM),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), bufs.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), bufs.capacity),
             BufferArg::from_raw_parts(scratch.rules.clone(), NGOL * 3),
             BufferArg::from_raw_parts(scratch.meta.clone(), pixels),
-            BufferArg::from_raw_parts(scratch.counters.clone(), COUNTER_WORDS),
             xres,
             yres,
             bufs.capacity as u32,
@@ -201,14 +159,13 @@ pub fn step_gol_gpu(
         );
         gol_update_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::new_1d(cubes),
+            gol_grid.clone(),
             CubeDim::new_1d(CUBE_DIM),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), bufs.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), bufs.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), bufs.capacity),
             BufferArg::from_raw_parts(scratch.rules.clone(), NGOL * 3),
             BufferArg::from_raw_parts(scratch.meta.clone(), pixels),
-            BufferArg::from_raw_parts(scratch.counters.clone(), COUNTER_WORDS),
             BufferArg::from_raw_parts(bufs.gpu_wall_bmap.clone(), bufs.wall_bmap.len()),
             BufferArg::from_raw_parts(bufs.gpu_wall_emap.clone(), bufs.wall_emap.len()),
             xres,
@@ -218,7 +175,7 @@ pub fn step_gol_gpu(
         );
         gol_birth_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::new_1d(cubes),
+            gol_grid,
             CubeDim::new_1d(CUBE_DIM),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), bufs.capacity),
@@ -227,22 +184,14 @@ pub fn step_gol_gpu(
             BufferArg::from_raw_parts(scratch.rules.clone(), NGOL * 3),
             BufferArg::from_raw_parts(scratch.meta.clone(), pixels),
             BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
-            BufferArg::from_raw_parts(scratch.counters.clone(), COUNTER_WORDS),
             bufs.capacity as u32,
             xres,
             yres,
             pixels as u32,
         );
-        gol_settle_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new_1d(1),
-            BufferArg::from_raw_parts(scratch.counters.clone(), COUNTER_WORDS),
-        );
     }
 
     gol.generations = gol.generations.wrapping_add(1);
-    gol.host_particles_seen = bufs.active_count;
     bufs.gpu_particles_dirty = true;
     bufs.gpu_maps_dirty = true;
     bufs.gpu_dirty = true;

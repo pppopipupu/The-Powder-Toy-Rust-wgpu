@@ -99,6 +99,7 @@ use cubecl::prelude::*;
 use tpt_core::constants::*;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_FORCE_PIX, SIM_SLOT_FORCE_SLOT, sim_grid};
 use super::shared::{WORD_PROPERTIES, elem_word, launch_grid, pmap_at, pmap_slot};
 use crate::buffers::SimBuffers;
 
@@ -262,7 +263,9 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
         return;
     }
 
-    let (cubes, dim) = launch_grid(dims.pixels);
+    let (_cubes, dim) = launch_grid(dims.pixels);
+    let pix_grid = sim_grid(bufs, SIM_SLOT_FORCE_PIX);
+    let slot_grid = sim_grid(bufs, SIM_SLOT_FORCE_SLOT);
 
     let (cell_cubes, cell_dim) = launch_grid(dims.cells);
     unsafe {
@@ -278,7 +281,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         dmg_blast_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -293,7 +296,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         dmg_apply_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -311,7 +314,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         accelerator_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -329,7 +332,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         repeller_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -348,7 +351,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     // The gather only needs to look as far as the longest beam in the scene;
     // without that bound it walked every ray to the canvas edge and dominated
     // particle-heavy frames.
-    let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
+    let (_slot_cubes, slot_dim) = launch_grid(dims.used_slots);
     unsafe {
         fray_range_clear_kernel::launch_unchecked(
             &bufs.client,
@@ -360,7 +363,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         fray_range_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
+            slot_grid,
             CubeDim::new_1d(slot_dim),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
@@ -372,7 +375,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         fray_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -391,7 +394,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         heac_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            pix_grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),

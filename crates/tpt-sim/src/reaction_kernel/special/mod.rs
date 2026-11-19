@@ -141,6 +141,7 @@
 use core::mem::offset_of;
 
 use cubecl::prelude::*;
+use tpt_core::constants::PT_CRAY;
 use tpt_core::elements::GpuElementProps;
 use tpt_core::particle::{GravityMode, SimulationConfig};
 
@@ -299,11 +300,11 @@ fn config_down_dir(config: &SimulationConfig) -> u32 {
 
 /// Entry point called once per reaction step.
 pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
-    let (cubes, dim) = launch_grid(dims.used_slots);
+    let (_cubes, dim) = launch_grid(dims.used_slots);
     unsafe {
         special_force_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_FORCE_SLOT),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_part_x.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_y.clone(), dims.capacity),
@@ -324,7 +325,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         special_air_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_AIR_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -348,7 +349,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         special_pressure_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_PRESSURE_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -370,10 +371,11 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     // Quartz: salt absorption, growth and the diffusion send. The receive
     // pass reads the messages the send pass just wrote, so it must be a
     // separate dispatch.
+    let qrtz_grid = super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_QRTZ_PIX);
     unsafe {
         qrtz_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            qrtz_grid.clone(),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -394,7 +396,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         qrtz_receive_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            qrtz_grid,
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -410,7 +412,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         special_transform_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_TRANSFORM_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -439,7 +441,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         seed_breed_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_SEED_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -459,11 +461,11 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     // every mercury's post-condense volume into the `intent_target` scratch and
     // the trade pass resolves all four trades per pixel from it, so neither
     // side of a trade ever writes the other's slot.
-    let (slot_cubes, slot_dim) = launch_grid(dims.used_slots);
+    let (_slot_cubes, slot_dim) = launch_grid(dims.used_slots);
     unsafe {
         merc_trade_snapshot_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(slot_cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_MERC_SLOT),
             CubeDim::new_1d(slot_dim),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
             BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
@@ -474,7 +476,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         merc_trade_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_MERC_PIX),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -488,39 +490,41 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
 
     // `CRAY.cpp:84-140`: the beams. Their creations go through the device
     // queue, which the driver drains after this pass.
-    unsafe {
-        cray_beam_kernel::launch_unchecked(
-            &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(dim),
-            BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
-            BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_part_dcolour.clone(), dims.capacity),
-            BufferArg::from_raw_parts(bufs.gpu_wall_bmap.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_wall_emap.clone(), dims.cells),
-            BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
-            BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
-            dims.xres,
-            dims.yres,
-            dims.xcells,
-        );
+    if bufs.has_seen_elem(PT_CRAY) {
+        unsafe {
+            cray_beam_kernel::launch_unchecked(
+                &bufs.client,
+                CubeCount::Static(cubes, 1, 1),
+                CubeDim::new_1d(dim),
+                BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
+                BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_life.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_ctype.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp2.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp3.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_tmp4.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_temp.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_part_dcolour.clone(), dims.capacity),
+                BufferArg::from_raw_parts(bufs.gpu_wall_bmap.clone(), dims.cells),
+                BufferArg::from_raw_parts(bufs.gpu_wall_emap.clone(), dims.cells),
+                BufferArg::from_raw_parts(bufs.gpu_elem_props.clone(), dims.elem_len),
+                BufferArg::from_raw_parts(bufs.gpu_create_queue.clone(), CREATE_QUEUE_WORDS),
+                dims.xres,
+                dims.yres,
+                dims.xcells,
+            );
+        }
     }
 
     // Energy-layer interactions: `GOLD` shielding and the `POLO` decay
     // chain. Slot parallel, but it needs the `photons` layer, so it cannot
     // live in the pixel-parallel transform pass above.
-    let (cubes, dim) = launch_grid(dims.used_slots);
+    let (_cubes, dim) = launch_grid(dims.used_slots);
     unsafe {
         special_photon_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(cubes, 1, 1),
+            super::dispatch::sim_grid(bufs, super::dispatch::SIM_SLOT_SPEC_PHOTON_SLOT),
             CubeDim::new_1d(dim),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),

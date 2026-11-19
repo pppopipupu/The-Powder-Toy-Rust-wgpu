@@ -43,6 +43,7 @@ use tpt_core::constants::*;
 use crate::buffers::SimBuffers;
 
 use super::PassDims;
+use super::dispatch::{SIM_SLOT_PORTALS_PIX, sim_grid};
 use super::shared::launch_grid;
 
 const PT_NONE_U32: u32 = PT_NONE;
@@ -111,7 +112,8 @@ pub fn temp_channel(temp: f32) -> u32 {
 
 /// Launch wireless and portal kernels for one reaction step.
 pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
-    let (pixel_cubes, pixel_dim) = launch_grid(dims.pixels);
+    let (_pixel_cubes, pixel_dim) = launch_grid(dims.pixels);
+    let portal_grid = sim_grid(bufs, SIM_SLOT_PORTALS_PIX);
 
     let (wifi_cubes, wifi_dim) = launch_grid(PORTAL_CHANNELS);
     unsafe {
@@ -126,7 +128,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         wifi_receive_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            portal_grid.clone(),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -142,7 +144,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         wifi_transmit_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            portal_grid.clone(),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_part_ty.clone(), dims.capacity),
@@ -159,7 +161,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         prti_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            portal_grid.clone(),
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
@@ -188,7 +190,7 @@ pub(super) fn launch(bufs: &SimBuffers, dims: &PassDims) {
     unsafe {
         prto_kernel::launch_unchecked(
             &bufs.client,
-            CubeCount::Static(pixel_cubes, 1, 1),
+            portal_grid,
             CubeDim::new_1d(pixel_dim),
             BufferArg::from_raw_parts(bufs.gpu_pmap.clone(), dims.pixels),
             BufferArg::from_raw_parts(bufs.gpu_photons.clone(), dims.pixels),
